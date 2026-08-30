@@ -1,9 +1,16 @@
-"""Compose a before/after TUI clip into a PNG frame sequence.
+"""Compose a TUI feature clip into a PNG frame sequence.
 
-Storyboard, all timings from the spec's `timing` block:
+Two shapes, chosen by how many panes the spec captures:
 
-    intro   both captures side by side, labelled, with a caption
-    swipe   the BEFORE panel slides out left while AFTER zooms to full frame
+  compare  two builds, `before` and `after`
+           intro   both captures side by side, labelled, with a caption
+           zoom    the BEFORE panel slides out left while AFTER fills the frame
+  solo     one build, for a feature with nothing to compare against
+           intro   the whole capture, centred, as an establishing shot
+           zoom    it grows in place to fill the frame
+
+From there both are the same:
+
     hold    one beat per annotation: everything but the band is dimmed
     pan     travel between annotations, captions cross-fading
     outro   the dim releases and the end caption appears
@@ -28,7 +35,8 @@ DEFAULT_THEME = {
     "before": [255, 107, 94],
     "after": [74, 222, 128],
 }
-DEFAULT_TIMING = {"intro": 2.1, "swipe": 0.8, "hold": 1.8, "pan": 0.4, "outro": 1.0}
+DEFAULT_TIMING = {"intro": 2.1, "zoom": 0.8, "hold": 1.8, "pan": 0.4, "outro": 1.0}
+DEFAULT_LABELS = {"before": "BEFORE", "after": "AFTER", "solo": "NEW"}
 
 
 def ease(t: float) -> float:
@@ -45,20 +53,42 @@ def fade(c, a: int):
     return tuple(int(v * a / 255) for v in c)
 
 
+def mode_of(spec: dict) -> str:
+    """'compare' when the spec captures both a before and an after, else 'solo'"""
+    panes = spec["capture"]["panes"]
+    if {"before", "after"} <= set(panes):
+        return "compare"
+    if len(panes) == 1:
+        return "solo"
+    raise SystemExit(
+        "capture.panes must be either {'before', 'after'} for a comparison "
+        f"or exactly one pane for a solo clip; got {sorted(panes)}"
+    )
+
+
+def subject_pane(spec: dict) -> str:
+    """the pane the annotations are drawn on"""
+    panes = spec["capture"]["panes"]
+    return "after" if mode_of(spec) == "compare" else next(iter(panes))
+
+
 class Renderer:
-    def __init__(self, spec: dict, before_png: str, after_png: str, outdir: str):
+    def __init__(self, spec: dict, captures: dict[str, str], outdir: str):
         r = spec["render"]
         self.spec = spec
         self.r = r
         self.outdir = outdir
+        self.mode = mode_of(spec)
 
-        self.B = Image.open(before_png).convert("RGB")
-        self.A = Image.open(after_png).convert("RGB")
-        if self.A.size != self.B.size:
-            raise SystemExit(
-                f"captures differ in size: {self.B.size} vs {self.A.size}; "
-                "both panes must use the same --geometry and --font"
-            )
+        self.A = Image.open(captures[subject_pane(spec)]).convert("RGB")
+        self.B = None
+        if self.mode == "compare":
+            self.B = Image.open(captures["before"]).convert("RGB")
+            if self.A.size != self.B.size:
+                raise SystemExit(
+                    f"captures differ in size: {self.B.size} vs {self.A.size}; "
+                    "both panes must use the same --geometry and --font"
+                )
         self.IW, self.IH = self.A.size
 
         self.rows = int(r["rows"])
@@ -78,24 +108,39 @@ class Renderer:
         self.th = {k: tuple(v) for k, v in th.items()}
 
         self.t = dict(DEFAULT_TIMING)
-        self.t.update(r.get("timing", {}))
+        given = dict(r.get("timing", {}))
+        if "swipe" in given and "zoom" not in given:   # pre-solo spelling
+            given["zoom"] = given.pop("swipe")
+        self.t.update(given)
 
         self.ann = r["annotations"]
+        if not self.ann:
+            raise SystemExit("render.annotations is empty; nothing to show")
         self.cap_intro = r.get("intro_caption", ["", ""])
         self.cap_outro = r.get("outro_caption", ["", ""])
-        self.labels = r.get("labels", {"before": "BEFORE", "after": "AFTER"})
+        lb = dict(DEFAULT_LABELS)
+        lb.update(r.get("labels", {}))
+        self.labels = lb
         self.title = r.get("title", "")
+        # the label that rides into the header once zoomed in
+        self.lead = self.labels["after"] if self.mode == "compare" else self.labels["solo"]
+        self.accent_intro = self.th["before"] if self.mode == "compare" else self.th["after"]
 
-        # phase-A panel geometry, derived so it always fits the canvas
+        # intro panel geometry, derived so it always fits the canvas
         label_h, gutter, margin = 44, 24, 16
         self.panel_y = self.header_h + label_h
         avail_h = self.cap_y - self.panel_y - 6
-        avail_w = (self.W - 2 * margin - gutter) / 2
+        avail_w = ((self.W - 2 * margin - gutter) / 2 if self.mode == "compare"
+                   else self.W - 2 * margin)
         self.s_a = min(avail_w / self.IW, avail_h / self.IH)
         self.panel_w = self.IW * self.s_a
         self.panel_h = self.IH * self.s_a
-        self.bx = (self.W - (2 * self.panel_w + gutter)) / 2
-        self.ax = self.bx + self.panel_w + gutter
+        if self.mode == "compare":
+            self.bx = (self.W - (2 * self.panel_w + gutter)) / 2
+            self.ax = self.bx + self.panel_w + gutter
+        else:
+            self.bx = None
+            self.ax = (self.W - self.panel_w) / 2
         self.s_c = self.vp[2] / self.IW
 
         self.f_label = ImageFont.truetype(BOLD, 40)
@@ -109,7 +154,7 @@ class Renderer:
     # -- geometry helpers ---------------------------------------------------
     def total(self) -> float:
         n = len(self.ann)
-        return (self.t["intro"] + self.t["swipe"] + self.t["hold"] * n
+        return (self.t["intro"] + self.t["zoom"] + self.t["hold"] * n
                 + self.t["pan"] * max(0, n - 1) + self.t["outro"])
 
     def ann_cy(self, i: int) -> float:
@@ -117,6 +162,8 @@ class Renderer:
         a = self.ann[i]
         half = self.vp[3] / self.s_c / 2
         cy = (a["rows"][0] + a["rows"][1]) / 2 * self.RH
+        if self.IH <= 2 * half:          # capture shorter than the viewport
+            return self.IH / 2
         return max(half, min(self.IH - half, cy))
 
     def band(self, i: int, py: float, s: float):
@@ -147,21 +194,22 @@ class Renderer:
         return nf
 
     def phase(self, t: float):
-        """-> (swipe progress p, annotation index, pan progress, outro progress)"""
+        """-> (zoom progress p, annotation index, pan progress, outro progress)"""
         T = self.t
         if t < T["intro"]:
             return 0.0, 0, 0.0, 0.0
-        if t < T["intro"] + T["swipe"]:
-            return ease((t - T["intro"]) / T["swipe"]), 0, 0.0, 0.0
-        u = t - T["intro"] - T["swipe"]
+        if T["zoom"] > 0 and t < T["intro"] + T["zoom"]:
+            return ease((t - T["intro"]) / T["zoom"]), 0, 0.0, 0.0
+        u = t - T["intro"] - T["zoom"]
         last = len(self.ann) - 1
         for i in range(len(self.ann)):
             seg = T["hold"] + (T["pan"] if i < last else 0)
             if u < seg:
-                pan = 0.0 if u < T["hold"] else ease((u - T["hold"]) / T["pan"])
+                pan = (0.0 if u < T["hold"] or T["pan"] <= 0
+                       else ease((u - T["hold"]) / T["pan"]))
                 return 1.0, i, pan, 0.0
             u -= seg
-        return 1.0, last, 0.0, ease(u / T["outro"]) if T["outro"] else 1.0
+        return 1.0, last, 0.0, ease(u / T["outro"]) if T["outro"] > 0 else 1.0
 
     def frame(self, n: int) -> Image.Image:
         th, W, H = self.th, self.W, self.H
@@ -180,8 +228,8 @@ class Renderer:
         src_cy = lerp(self.IH / 2,
                       lerp(self.ann_cy(ai), self.ann_cy(nxt), pan), p)
 
-        # BEFORE panel, sliding out to the left
-        if p < 1.0:
+        # BEFORE panel, sliding out to the left (comparison clips only)
+        if self.B is not None and p < 1.0:
             bx = int(round(lerp(self.bx, -self.panel_w - 100, p)))
             pw, ph = int(round(self.panel_w)), int(round(self.panel_h))
             lay = Image.new("RGB", (pw, ph), th["bg"])
@@ -192,7 +240,7 @@ class Renderer:
             d.rectangle([bx, self.panel_y, bx + pw - 1, self.panel_y + ph - 1],
                         outline=th["panel_border"], width=2)
 
-        # AFTER panel, zooming from side-by-side to the full viewport
+        # subject panel, growing from the intro shot to the full viewport
         cwi, chi = int(round(cw)), int(round(ch))
         lay = Image.new("RGB", (cwi, chi), th["bg"])
         px = int(round(cwi / 2 - self.IW / 2 * s))
@@ -221,7 +269,7 @@ class Renderer:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
                         outline=th["panel_border"], width=2)
 
-        # header: side-by-side labels cross-fade into a single AFTER banner
+        # header: intro labels cross-fade into a single banner
         d.rectangle([0, 0, W, self.panel_y - 44 if p < 0.5 else self.vp[1]],
                     fill=th["bg"])
         a_in = int(255 * max(0.0, min(1.0, (p - 0.45) / 0.40)))
@@ -229,19 +277,25 @@ class Renderer:
         if a_out > 4:
             d.text((W / 2, 40), self.title, font=self.f_meta,
                    fill=fade(th["muted"], a_out), anchor="mm")
-            d.text((self.bx + self.panel_w / 2, 108), self.labels["before"],
-                   font=self.f_label, fill=fade(th["before"], a_out), anchor="mm")
-            d.text((self.ax + self.panel_w / 2, 108), self.labels["after"],
-                   font=self.f_label, fill=fade(th["after"], a_out), anchor="mm")
+            if self.B is not None:
+                d.text((self.bx + self.panel_w / 2, 108), self.labels["before"],
+                       font=self.f_label, fill=fade(th["before"], a_out), anchor="mm")
+            if self.lead:
+                d.text((self.ax + self.panel_w / 2, 108), self.lead,
+                       font=self.f_label, fill=fade(th["after"], a_out), anchor="mm")
         if a_in > 4:
-            d.text((32, 50), self.labels["after"], font=self.f_hdr,
-                   fill=fade(th["after"], a_in), anchor="lm")
-            d.text((W - 32, 52), self.title, font=self.f_meta,
-                   fill=fade(th["muted"], a_in), anchor="rm")
+            if self.lead:
+                d.text((32, 50), self.lead, font=self.f_hdr,
+                       fill=fade(th["after"], a_in), anchor="lm")
+                d.text((W - 32, 52), self.title, font=self.f_meta,
+                       fill=fade(th["muted"], a_in), anchor="rm")
+            else:
+                d.text((32, 50), self.title, font=self.f_meta,
+                       fill=fade(th["muted"], a_in), anchor="lm")
 
         # caption bar
         d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
-        accent = th["before"] if p < 0.5 else th["after"]
+        accent = self.accent_intro if p < 0.5 else th["after"]
         d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade(accent, 200))
 
         head, sub, ca = self.cap_intro[0], self.cap_intro[1], 255
