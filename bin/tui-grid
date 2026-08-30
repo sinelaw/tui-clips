@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Overlay a row/column grid on a capture so you can read off annotation cells.
+
+    tui-grid shot.png --rows 50 --cols 64 [--slice 0.5] [--out grid.png]
+
+Rows are labelled down the left edge, columns along the top. Annotation bands in
+a clip spec are given in these same cell units, so you read the numbers straight
+off this image. --slice N crops to the Nth half/third of the image so the labels
+stay legible when you view it.
+"""
+import argparse
+import os
+from PIL import Image, ImageDraw, ImageFont
+
+FONT = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("image")
+    ap.add_argument("--rows", type=int, required=True)
+    ap.add_argument("--cols", type=int, required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--parts", type=int, default=1,
+                    help="split the output into N vertical parts (default 1)")
+    args = ap.parse_args()
+
+    im = Image.open(args.image).convert("RGB")
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 16)
+    rh = im.height / args.rows
+    cw = im.width / args.cols
+
+    for r in range(args.rows + 1):
+        y = int(r * rh)
+        d.line([(0, y), (im.width, y)], fill=(255, 0, 255), width=1)
+        d.text((3, y + 1), str(r), font=f, fill=(255, 0, 255))
+    for c in range(args.cols + 1):
+        x = int(c * cw)
+        major = c % 5 == 0
+        d.line([(x, 0), (x, im.height)],
+               fill=(0, 255, 255) if major else (0, 110, 110), width=1)
+        if major:
+            d.text((x + 2, im.height - 20), str(c), font=f, fill=(0, 255, 255))
+
+    base = args.out or os.path.splitext(args.image)[0] + "_grid.png"
+    if args.parts <= 1:
+        im.save(base)
+        print(base)
+        return
+    stem, ext = os.path.splitext(base)
+    step = im.height // args.parts
+    for i in range(args.parts):
+        top = i * step
+        bot = im.height if i == args.parts - 1 else top + step
+        out = f"{stem}_{i}{ext}"
+        im.crop((0, top, im.width, bot)).save(out)
+        print(out)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Screenshot a terminal program running on a headless X display.
+#
+# The program is launched in its own xfce4-terminal on an Xvfb display, driven
+# with xdotool, and captured with ImageMagick `import`. Nothing touches the
+# user's real session.
+#
+#   tui-capture --out shot.png --geometry 64x50 --font "JetBrains Mono 21" \
+#               --workdir /tmp/proj --settle 8 \
+#               --env XDG_DATA_HOME=/tmp/scratch/data \
+#               --key ctrl+p --type "toggle compose" --key Return \
+#               -- /usr/bin/myeditor README.md
+set -euo pipefail
+
+DISPLAY_NUM=":99"
+SCREEN="1600x2200x24"
+GEOMETRY="80x24"
+FONT="JetBrains Mono 21"
+WORKDIR="$PWD"
+SETTLE=8
+OUT=""
+ACTIONS=()
+ENVS=()
+KEEP=0
+STOP=0
+
+die() { echo "tui-capture: $*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --display)  DISPLAY_NUM="$2"; shift 2 ;;
+    --screen)   SCREEN="$2";      shift 2 ;;
+    --geometry) GEOMETRY="$2";    shift 2 ;;
+    --font)     FONT="$2";        shift 2 ;;
+    --workdir)  WORKDIR="$2";     shift 2 ;;
+    --settle)   SETTLE="$2";      shift 2 ;;
+    --out)      OUT="$2";         shift 2 ;;
+    --env)      ENVS+=("$2");     shift 2 ;;
+    --key)      ACTIONS+=("key:$2");   shift 2 ;;
+    --type)     ACTIONS+=("type:$2");  shift 2 ;;
+    --sleep)    ACTIONS+=("sleep:$2"); shift 2 ;;
+    --keep-display) KEEP=1; shift ;;
+    --stop) STOP=1; shift ;;
+    --) shift; break ;;
+    *) die "unknown flag $1" ;;
+  esac
+done
+if [[ $STOP -eq 1 ]]; then
+  # Match, then kill by pid: a `pkill -f` pattern can match the shell running
+  # this script and take it out along with the target.
+  export DISPLAY="$DISPLAY_NUM"
+  for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 1
+  for pid in $(pgrep -x Xvfb 2>/dev/null || true); do
+    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null \
+      | grep -q -- " $DISPLAY_NUM " && kill -9 "$pid" 2>/dev/null || true
+  done
+  exit 0
+fi
+
+[[ -n "$OUT" ]] || die "--out is required"
+[[ $# -gt 0 ]] || die "no command given (put it after --)"
+CMD=("$@")
+
+for t in Xvfb xfce4-terminal xdotool import; do
+  command -v "$t" >/dev/null || die "missing required tool: $t"
+done
+
+export DISPLAY="$DISPLAY_NUM"
+for e in "${ENVS[@]:-}"; do [[ -n "$e" ]] && export "${e?}"; done
+
+# Start Xvfb only if this display is not already answering.
+started_xvfb=0
+if ! timeout 2 xdotool getdisplaygeometry >/dev/null 2>&1; then
+  setsid nohup Xvfb "$DISPLAY_NUM" -screen 0 "$SCREEN" -nolisten tcp \
+    >/tmp/tui-clips-xvfb$$.log 2>&1 < /dev/null &
+  started_xvfb=1
+  sleep 2
+  timeout 3 xdotool getdisplaygeometry >/dev/null 2>&1 \
+    || die "Xvfb $DISPLAY_NUM did not come up (see /tmp/tui-clips-xvfb$$.log)"
+fi
+
+# NOTE: never `pkill -f xfce4-terminal` here. A -f pattern can match the shell
+# that is running this script. Match, then kill by pid.
+for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
+  kill "$pid" 2>/dev/null || true
+done
+sleep 1
+
+setsid nohup xfce4-terminal --disable-server \
+  --hide-menubar --hide-toolbar --hide-scrollbar --hide-borders \
+  --geometry="$GEOMETRY" --font="$FONT" --working-directory="$WORKDIR" \
+  -x "${CMD[@]}" >/tmp/tui-clips-term$$.log 2>&1 < /dev/null &
+
+sleep "$SETTLE"
+
+WID="$(xdotool search --name "Terminal - " | tail -1 || true)"
+[[ -n "$WID" ]] || die "no terminal window appeared (see /tmp/tui-clips-term$$.log)"
+xdotool windowfocus "$WID"
+sleep 0.5
+
+for a in "${ACTIONS[@]:-}"; do
+  [[ -n "$a" ]] || continue
+  case "$a" in
+    key:*)   xdotool key   --window "$WID" "${a#key:}"; sleep 1.2 ;;
+    type:*)  xdotool type  --window "$WID" --delay 40 "${a#type:}"; sleep 1.2 ;;
+    sleep:*) sleep "${a#sleep:}" ;;
+  esac
+done
+sleep 1.5
+
+mkdir -p "$(dirname "$OUT")"
+import -window "$WID" "$OUT"
+
+for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
+  kill "$pid" 2>/dev/null || true
+done
+if [[ $started_xvfb -eq 1 && $KEEP -eq 0 ]]; then
+  for pid in $(pgrep -x Xvfb 2>/dev/null || true); do
+    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null \
+      | grep -q -- " $DISPLAY_NUM " && kill -9 "$pid" 2>/dev/null || true
+  done
+fi
+
+echo "$OUT"
