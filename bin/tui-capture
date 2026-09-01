@@ -10,6 +10,10 @@
 #               --env XDG_DATA_HOME=/tmp/scratch/data \
 #               --key ctrl+p --type "toggle compose" --key Return \
 #               -- /usr/bin/myeditor README.md
+#
+# --shot takes a screenshot mid-sequence, in among the keys. That is how a
+# capture and something the program can only tell you afterwards — a UI tree
+# dump, say — come from one run and so describe the same screen.
 set -euo pipefail
 
 DISPLAY_NUM=":99"
@@ -37,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --out)      OUT="$2";         shift 2 ;;
     --env)      ENVS+=("$2");     shift 2 ;;
     --key)      ACTIONS+=("key:$2");   shift 2 ;;
+    --shot)     ACTIONS+=("shot:$2");  shift 2 ;;
     --type)     ACTIONS+=("type:$2");  shift 2 ;;
     --sleep)    ACTIONS+=("sleep:$2"); shift 2 ;;
     --keep-display) KEEP=1; shift ;;
@@ -107,6 +112,8 @@ for a in "${ACTIONS[@]:-}"; do
     key:*)   xdotool key   --window "$WID" "${a#key:}"; sleep 1.2 ;;
     type:*)  xdotool type  --window "$WID" --delay 40 "${a#type:}"; sleep 1.2 ;;
     sleep:*) sleep "${a#sleep:}" ;;
+    shot:*)  mkdir -p "$(dirname "${a#shot:}")"
+             import -window "$WID" "${a#shot:}" ;;
   esac
 done
 sleep 1.5

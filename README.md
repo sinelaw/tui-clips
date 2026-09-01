@@ -1,7 +1,8 @@
 # tui-clips
 
-Short annotated videos of a terminal program, from a JSON spec — either two
-builds side by side, or one build on its own.
+Short annotated videos of a terminal program, from a JSON spec — two builds
+side by side, one build on its own, or one screen taken apart into the
+elements behind it.
 
 ## Quick start
 
@@ -25,7 +26,7 @@ iterating:
 `tui-grid` overlays a numbered row/column grid on a capture. Annotation bands
 are written in those same cells, so you read the numbers straight off it.
 
-## Two shapes
+## Three shapes
 
 **Comparison** — panes named `before` and `after`. Both captures appear side by
 side, the BEFORE panel swipes out left, the AFTER zooms to full frame, then one
@@ -35,8 +36,16 @@ annotated beat per callout. See `specs/fresh-markdown-compose.json`.
 The capture opens centred as an establishing shot, grows in place to fill the
 frame, then the same annotated beats. See `specs/fresh-markdown-compose-solo.json`.
 
-The mode is inferred from the pane set. Everything after the opening — the
-zoom, the dimmed bands, the captions, the outro — is identical.
+**Explode** — one pane, plus a `render.explode` section naming rects on the
+screen. The capture comes apart: every named piece slides out of it, the
+original left behind as a ghost, and the camera then visits each piece in
+turn. A piece that has pieces of its own bursts open in place when the camera
+reaches it, so a screen can be taken apart down as many levels as it has. See
+`specs/fresh-ui-anatomy.json`.
+
+The mode is `explode` when the spec has a `render.explode`, else it is inferred
+from the pane set. For the first two, everything after the opening — the zoom,
+the dimmed bands, the captions, the outro — is identical.
 
 ## Spec
 
@@ -98,5 +107,85 @@ screen, since the clip pans vertically over the capture; and park the caret on a
 in a rendered mode, which reads as a rendering flaw to anyone who does not know
 the app.
 
-`lib/render.py` holds the storyboard: one `frame(n)`, driven by `phase(t)`
+## Explode specs
+
+Instead of `annotations`, an explode clip gives `render.explode.pieces` — a
+tree. Each piece is a rect in cells, a short `label` for the chip that rides
+with it, and the `head`/`sub` for its beat. A piece with no `head` is drawn and
+labelled but never dwelt on, which is what you want for the thirty rows of a
+list.
+
+```jsonc
+"explode": {
+  "spread": 0.4,                 // default push-apart, as a fraction of the
+                                 // distance from the container's centre
+  "pieces": [
+    {"rows": [0, 1], "cols": [0, 127],
+     "offset": [0, -3],          // cells; overrides `spread` for this piece
+     "label": "Menu bar", "label_at": "above",   // auto|above|below|left|right
+     "head": "The menu bar is a region",
+     "sub": "it rebuilds only when its own state moves"},
+
+    {"rows": [22, 35], "cols": [0, 127], "offset": [0, 17],
+     "label": "Command palette", "label_at": "below",
+     "spread": [0, 0.95],        // how this piece's own children come apart
+     "stagger": [1.15, 0],       // ... and how far each one is dealt past the last
+     "head": "The palette is a layer", "sub": "it floats over the rest",
+     "dive_head": "Ten rows, ranked",     // the caption while it is open
+     "dive_sub": "only what fits is ever built",
+     "pieces": [ ... ]
+  ]
+}
+```
+
+`stagger` is what makes a long list worth looking at: pushing thirty
+same-shaped rows apart radially just piles them up along one axis, whereas
+dealing each one a little further along than the last opens them into a fan.
+
+Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
+`regroup`, `implode`, `outro`. Set any to `0` to drop that beat.
+
+## Where the rects come from
+
+Reading two dozen nested rects off a grid by hand is not worth doing. If the
+program can report its own layout, `tui-tree` turns that report into pieces.
+`fresh` writes its retained UI tree as JSON — one object per element, with the
+rect the layout gave it — from **Dump UI Tree** in the command palette. Get the
+JSON out of the editor with `ctrl+a`, `ctrl+n`, `ctrl+v`, then save it.
+
+```sh
+./bin/tui-tree tree.json --list                 # every element that has a key
+./bin/tui-tree tree.json --list --all --grep pane
+./bin/tui-tree tree.json plan.json --into specs/mine.json
+```
+
+A *plan* names elements and says what to call them; the dump supplies the
+rects, so a font or geometry change costs one re-dump and no edits:
+
+```jsonc
+[{"key": "region:2", "label": "Menu bar", "offset": [0, -3],
+  "head": "...", "sub": "..."},
+ {"key": "region:3", "label": "File explorer", "stagger": [1.15, 0],
+  "head": "...", "sub": "...", "dive_head": "...", "dive_sub": "...",
+  "children": [{"key": "explorer_row:*", "label": ""}]}]
+```
+
+`id` matches the element's id and `key` its key, either exactly or as a glob;
+a glob that hits several elements expands to one piece each. Everything else
+in an entry passes straight through to the piece.
+
+Two capture options exist for this shape: `workdir` points the program at a
+real directory instead of the scratch copy, for something that has nothing to
+show without one, and `copy_dirs` brings a config directory along as a copy, so
+the capture gets the real look without the run being able to write back over
+it. A `{"shot": "path"}` step takes a screenshot mid-sequence, which is how a
+capture and a dump of the same screen come out of one run.
+
+## Storyboards
+
+`lib/render.py` holds both. `Renderer` is one `frame(n)` driven by `phase(t)`,
 mapping a timestamp to `(zoom, annotation index, pan, outro)`.
+`ExplodeRenderer` builds an explicit list of segments up front, each with a
+camera move and a caption; a piece's position at any moment is its own rect
+plus every ancestor's offset, weighted by how far that ancestor has come
+apart.
