@@ -37,11 +37,16 @@ The capture opens centred as an establishing shot, grows in place to fill the
 frame, then the same annotated beats. See `specs/fresh-markdown-compose-solo.json`.
 
 **Explode** — one pane, plus a `render.explode` section naming rects on the
-screen. The capture comes apart: every named piece slides out of it, the
-original left behind as a ghost, and the camera then visits each piece in
-turn. A piece that has pieces of its own bursts open in place when the camera
-reaches it, so a screen can be taken apart down as many levels as it has. See
-`specs/fresh-ui-anatomy.json`.
+screen. The capture comes apart: every named piece is cut out of it and slides
+away, and the camera then visits each piece in turn. A piece that has pieces of
+its own bursts open in place when the camera reaches it, so a screen can be
+taken apart down as many levels as it has. See `specs/fresh-ui-anatomy.json`.
+
+Cut out, not faded out: the original does not stay behind the pieces, and a
+piece drawn over by another loses those pixels to a hole. A capture is flat, so
+an overlay's pixels sit in the image at the rows the things underneath occupy —
+cut those out as they are and every one of them carries a copy of the overlay
+away with it.
 
 The mode is `explode` when the spec has a `render.explode`, else it is inferred
 from the pane set. For the first two, everything after the opening — the zoom,

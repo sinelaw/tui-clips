@@ -73,15 +73,15 @@
     ],
     "timing": {
       "intro": 1.5,
-      "explode": 1.5,
-      "survey": 1.9,
-      "move": 0.5,
-      "hold": 1.9,
-      "dive": 0.85,
-      "rise": 0.6,
-      "regroup": 0.6,
-      "implode": 1.1,
-      "outro": 1.6
+      "explode": 1.4,
+      "survey": 1.3,
+      "move": 0.45,
+      "hold": 1.1,
+      "dive": 0.7,
+      "rise": 0.5,
+      "regroup": 0.5,
+      "implode": 1.0,
+      "outro": 1.5
     },
     "explode": {
       "spread": 0.4,
