@@ -361,7 +361,7 @@ DEFAULT_EXPLODE_TIMING = {
 CONTEXT = 1.36
 SURVEY_CONTEXT = 1.05
 # how far a container has to open before nothing of it is left behind
-GHOST_GONE = 0.30
+GHOST_GONE = 0.04
 # how far an uninvolved piece recedes while a sibling is being taken apart
 ASIDE = 0.09
 
@@ -375,6 +375,28 @@ def _shift(r, off):
     return (r[0] + off[0], r[1] + off[1], r[2] + off[0], r[3] + off[1])
 
 
+def _meet(a, b):
+    """where two rects overlap, or None"""
+    r = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return r if r[2] > r[0] and r[3] > r[1] else None
+
+
+def _cut_overlaps(pieces, inherited=()):
+    """work out what each piece must not carry away with it.
+
+    A capture is flat: the palette's pixels are in the image at the rows the
+    explorer and the editor occupy, so cutting those two out cuts out a copy of
+    the palette along with them, and pulling the pieces apart leaves the copy
+    on show. Whatever is drawn over a piece is therefore a hole in it — those
+    pixels belong to the overlay, and what was underneath was never captured.
+    """
+    for i, p in enumerate(pieces):
+        holes = [h for h in (_meet(p.src, q) for q in inherited) if h]
+        holes += [h for h in (_meet(p.src, o.src) for o in pieces[i + 1:]) if h]
+        p.holes = tuple(holes)
+        _cut_overlaps(p.children, p.holes)
+
+
 def _lerp_rect(a, b, t):
     return tuple(lerp(a[k], b[k], t) for k in range(4))
 
@@ -382,10 +404,10 @@ def _lerp_rect(a, b, t):
 def _ghost(e: float) -> float:
     """what is left of a container while its children come out of it.
 
-    Gone well before they have finished separating. A half-faded copy of the
-    original sitting behind pieces that have only half moved reads as a smear,
-    not as a thing coming apart: the pieces carry the image, so the original is
-    cut up rather than left behind it.
+    Gone as soon as anything moves. A copy of the original sitting behind
+    pieces that have only half moved reads as a smear, not as a thing coming
+    apart — and at rest the pieces cover what they were cut from anyway, so
+    there is nothing to keep. The pieces carry the image.
     """
     return max(0.0, 1.0 - e / GHOST_GONE)
 
@@ -414,6 +436,7 @@ class Piece:
         self.cols = [float(v) for v in d.get("cols", [cont[0], cont[2]])]
         self.src = (self.cols[0], self.rows[0], self.cols[1], self.rows[1])
         self.path = path
+        self.holes: tuple = ()          # filled in by `_cut_overlaps`
         self.head = d.get("head", "")
         self.sub = d.get("sub", "")
         self.label = d.get("label", self.head)
@@ -498,6 +521,7 @@ class ExplodeRenderer:
         mid = (len(ex["pieces"]) - 1) / 2
         self.pieces = [Piece(d, (i,), self.screen, spread, stagger, i - mid)
                        for i, d in enumerate(ex["pieces"])]
+        _cut_overlaps(self.pieces)
         if not self.pieces:
             raise SystemExit("render.explode.pieces is empty; nothing to take apart")
         self.by_path = {p.path: p for p in self.walk()}
@@ -670,17 +694,27 @@ class ExplodeRenderer:
         raise AssertionError("empty timeline")
 
     # -- painting -----------------------------------------------------------
-    def scaled(self, src, size):
-        key = (src, size)
+    def scaled(self, src, size, holes=()):
+        key = (src, size, holes)
         if key not in self._cache:
             if len(self._cache) > 240:
                 self._cache.clear()
             box = (int(round(src[0] * self.CW)), int(round(src[1] * self.RH)),
                    int(round(src[2] * self.CW)), int(round(src[3] * self.RH)))
-            self._cache[key] = self.A.crop(box).resize(size, Image.LANCZOS)
+            crop = self.A.crop(box)
+            if holes:
+                hd = ImageDraw.Draw(crop)
+                for h in holes:
+                    hd.rectangle(
+                        [int(round(h[0] * self.CW)) - box[0],
+                         int(round(h[1] * self.RH)) - box[1],
+                         int(round(h[2] * self.CW)) - box[0] - 1,
+                         int(round(h[3] * self.RH)) - box[1] - 1],
+                        fill=self.th["bg"])
+            self._cache[key] = crop.resize(size, Image.LANCZOS)
         return self._cache[key]
 
-    def _paint(self, cv, src, dest, alpha: float, dim: float):
+    def _paint(self, cv, src, dest, alpha: float, dim: float, holes=()):
         if alpha <= 0.006:
             return None
         x0, y0 = int(round(dest[0])), int(round(dest[1]))
@@ -688,7 +722,7 @@ class ExplodeRenderer:
         h = max(1, int(round(dest[3])) - y0)
         if x0 > self.W or y0 > self.cap_y or x0 + w < 0 or y0 + h < self.header_h:
             return (x0, y0, w, h)          # off frame: place it, do not paint it
-        img = self.scaled(src, (w, h))
+        img = self.scaled(src, (w, h), holes)
         if dim > 0.004:
             img = Image.blend(img, Image.new("RGB", (w, h), self.th["bg"]), dim)
         if alpha >= 0.995:
@@ -712,11 +746,12 @@ class ExplodeRenderer:
             if q > 0.0:
                 # this piece is (or is becoming) a container: what is left of it
                 # goes down first, and its children over the top
-                self._paint(cv, p.src, dest, a * _ghost(q), 0.0)
+                self._paint(cv, p.src, dest, a * _ghost(q), 0.0, p.holes)
                 self._draw_group(cv, d, p.children, p.path, levels, cam, poff,
                                  a, focus, labels)
                 continue
-            box = self._paint(cv, p.src, dest, a, 0.55 * (1.0 - lit) * e)
+            box = self._paint(cv, p.src, dest, a, 0.55 * (1.0 - lit) * e,
+                              p.holes)
             if box and e > 0.06:
                 self._outline(d, box, lit, a * e)
             if p.label and e > 0.10:
