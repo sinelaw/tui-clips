@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Turn a retained-UI-tree dump into explode pieces for a clip spec.
+
+`fresh`'s "Dump UI Tree" command writes the window's retained tree as JSON —
+one object per element, nested through `children`, each with the rect the
+layout gave it in terminal cells:
+
+    {"id": "E5", "type": "Box", "key": "chrome_column",
+     "rect": {"x": 0, "y": 0, "w": 127, "h": 36}, "children": [...]}
+
+Cells are exactly what `render.explode` wants, so the rects come straight
+across instead of being read off a grid by hand.
+
+    tui-tree tree.json --list                  # every element that has a key
+    tui-tree tree.json --list --all --grep pane
+    tui-tree tree.json plan.json               # -> pieces JSON on stdout
+    tui-tree tree.json plan.json --into spec.json   # ... written into the spec
+
+A plan names elements and says what to call them; the dump supplies the rects:
+
+    [{"key": "region:2", "label": "Menu bar", "head": "...", "sub": "..."},
+     {"key": "region:3", "label": "File explorer", "head": "...", "sub": "...",
+      "children": [{"key": "explorer_row:*", "label": ""}]}]
+
+`id` matches the E-number and `key` the element's key, either exactly or as a
+`*` glob; a glob that hits several elements expands to one piece each, and `{n}`
+in any of that entry's strings becomes the hit's 1-based number. Every other
+field — `offset`, `spread`, `label_at`, `dive_head` and the rest — is the
+clip's business and passes through untouched.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import sys
+
+# everything but the selector and the nesting is the clip's business, not
+# this tool's, and passes straight through to the piece
+NOT_A_FIELD = {"id", "key", "children"}
+
+
+class Node:
+    __slots__ = ("id", "key", "type", "rect", "text", "depth", "kids")
+
+    def __init__(self, d: dict, depth: int):
+        self.id = d.get("id", "?")
+        self.key = d.get("key")
+        self.type = d.get("type", "?")
+        r = d.get("rect", {})
+        self.rect = (r.get("x", 0), r.get("y", 0), r.get("w", 0), r.get("h", 0))
+        self.text = d.get("text")
+        self.depth = depth
+        self.kids = [Node(c, depth + 1) for c in d.get("children", [])]
+
+    @property
+    def rows(self):
+        return [self.rect[1], self.rect[1] + self.rect[3]]
+
+    @property
+    def cols(self):
+        return [self.rect[0], self.rect[0] + self.rect[2]]
+
+    def walk(self):
+        yield self
+        for k in self.kids:
+            yield from k.walk()
+
+    def title(self) -> str:
+        base = self.type.split("<")[0]
+        return f"{base} #{self.key}" if self.key else base
+
+
+def select(nodes: list[Node], sel: dict) -> list[Node]:
+    """the elements a plan entry names, in dump order"""
+    if "id" in sel:
+        pat, attr = sel["id"], "id"
+    elif "key" in sel:
+        pat, attr = sel["key"], "key"
+    else:
+        raise SystemExit(f"plan entry needs an 'id' or a 'key': {sel}")
+    hits = [n for n in nodes
+            if getattr(n, attr) and fnmatch.fnmatchcase(getattr(n, attr), pat)]
+    if not hits:
+        raise SystemExit(f"no element matches {attr}={pat!r}")
+    return hits
+
+
+def build(nodes: list[Node], plan: list[dict]) -> list[dict]:
+    out = []
+    for sel in plan:
+        hits = select(nodes, sel)
+        for k, n in enumerate(hits):
+            piece = {"rows": n.rows, "cols": n.cols}
+            for field, v in sel.items():
+                if field in NOT_A_FIELD:
+                    continue
+                piece[field] = (v.replace("{n}", str(k + 1))
+                                if isinstance(v, str) else v)
+            if n.text and "label" not in sel:
+                piece["label"] = n.text.strip()
+            if "children" in sel:
+                if len(hits) > 1:
+                    raise SystemExit(
+                        f"{sel.get('key') or sel['id']!r} matches {len(hits)} "
+                        "elements and also has children; a nested explosion "
+                        "needs a selector that names exactly one")
+                piece["pieces"] = build(nodes, sel["children"])
+            out.append(piece)
+    return out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("tree", help="JSON written by fresh's Dump UI Tree")
+    ap.add_argument("plan", nargs="?")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--all", action="store_true",
+                    help="list unkeyed elements too")
+    ap.add_argument("--grep", help="only list lines matching this substring")
+    ap.add_argument("--into", help="write the pieces into this spec's render.explode")
+    args = ap.parse_args()
+
+    with open(args.tree) as fh:
+        root = Node(json.load(fh), 0)
+    nodes = list(root.walk())
+
+    if args.list:
+        for n in nodes:
+            if not args.all and not n.key:
+                continue
+            x, y, w, h = n.rect
+            line = f"{'  ' * n.depth}{n.id:>6}  @({x},{y} {w}x{h})  {n.title()}"
+            if n.text:
+                line += f"  {n.text[:48]!r}"
+            if args.grep and args.grep.lower() not in line.lower():
+                continue
+            print(line)
+        return
+
+    if not args.plan:
+        ap.error("give a plan file, or --list")
+    with open(args.plan) as fh:
+        plan = json.load(fh)
+    pieces = build(nodes, plan)
+
+    if not args.into:
+        json.dump(pieces, sys.stdout, indent=2)
+        print()
+        return
+    with open(args.into) as fh:
+        spec = json.load(fh)
+    spec.setdefault("render", {}).setdefault("explode", {})["pieces"] = pieces
+    with open(args.into, "w") as fh:
+        json.dump(spec, fh, indent=2)
+        fh.write("\n")
+    print(f"{args.into}: {len(pieces)} top-level pieces")
+
+
+if __name__ == "__main__":
+    main()

@@ -2,7 +2,8 @@
 """Build a TUI feature clip from a JSON spec.
 
 Two panes named `before` and `after` make a comparison clip; a single pane makes
-a solo clip, for a feature that has nothing to compare against.
+a solo clip, for a feature that has nothing to compare against. A spec with a
+`render.explode` section instead takes its one capture apart, piece by piece.
 
     tui-clip specs/thing.json                 # capture, render, encode
     tui-clip specs/thing.json --skip-capture  # reuse out/<name>/*.png
@@ -35,11 +36,14 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str) -> Non
     cap = spec["capture"]
     p = cap["panes"][pane]
     ctx = {"scratch": scratch, "proj": proj, "pane": pane}
+    # `workdir` opts out of the scratch copy, for a program that has to be
+    # pointed at a real tree to have anything to show.
+    workdir = expand(p.get("workdir", cap.get("workdir", "{proj}")), ctx)
     argv = [os.path.join(ROOT, "bin", "tui-capture"),
             "--out", out_png,
             "--geometry", cap["geometry"],
             "--font", cap["font"],
-            "--workdir", proj,
+            "--workdir", workdir,
             "--display", cap.get("display", ":99"),
             "--screen", cap.get("screen", "1600x2200x24"),
             "--settle", str(p.get("settle", cap.get("settle", 8))),
@@ -53,6 +57,8 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str) -> Non
             argv += ["--type", step["type"]]
         elif "sleep" in step:
             argv += ["--sleep", str(step["sleep"])]
+        elif "shot" in step:
+            argv += ["--shot", expand(step["shot"], ctx)]
     argv += ["--"] + [expand(a, ctx) for a in p["argv"]]
     print(f"  capturing {pane} ...", flush=True)
     subprocess.run(argv, check=True, stdout=subprocess.DEVNULL)
@@ -87,6 +93,13 @@ def main() -> None:
         for src in spec["capture"].get("copy_files", []):
             src = expand(src, {})
             shutil.copy(src, os.path.join(proj, os.path.basename(src)))
+        # A program that reads a config directory shows a different UI with and
+        # without one, so a clip that wants the real look has to bring a copy —
+        # a copy, so the run cannot write back over the real thing.
+        for src, dst in spec["capture"].get("copy_dirs", {}).items():
+            dst = expand(dst, {"scratch": scratch, "proj": proj})
+            shutil.copytree(expand(src, {}), dst, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(".git", "logs"))
         try:
             for pane in panes:
                 capture(spec, pane, captures[pane], proj, scratch)
@@ -105,7 +118,7 @@ def main() -> None:
         return
 
     print(f"  rendering frames ({mode}) ...", flush=True)
-    r = render.Renderer(spec, captures, frames)
+    r = render.make(spec, captures, frames)
     nf = r.run()
     dur = nf / r.fps
     print(f"  {nf} frames, {dur:.2f}s")
