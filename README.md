@@ -63,7 +63,8 @@ the dimmed bands, the captions, the outro — is identical.
     "screen": "1600x2200x24",         // must exceed the terminal window
     "display": ":99",
     "settle": 8,                      // seconds to wait for the first paint
-    "copy_files": ["~/repo/FILE.md"], // copied into a scratch working dir
+    "copy_files": ["~/repo/FILE.md",  // copied into a scratch working dir
+                   {"src": "~/repo/docs/index.md", "as": "configuration.md"}],
     "env": {                          // {scratch} {proj} {pane} expand
       "XDG_DATA_HOME": "{scratch}/data-{pane}",
       "XDG_RUNTIME_DIR": "{scratch}/run"
@@ -71,7 +72,9 @@ the dimmed bands, the captions, the outro — is identical.
     "keys": [                         // driven into every pane, in order
       {"key": "ctrl+p"},
       {"type": "toggle compose"},
-      {"key": "Return"}
+      {"key": "Return"},
+      {"shot": "rest"},               // a named screen a beat can be drawn on
+      {"key": "Next"}
     ],
     "panes": {                        // {before, after} to compare, else one
       "before": {"argv": ["~/.local/bin/app", "FILE.md:39:1"]},
@@ -95,16 +98,57 @@ the dimmed bands, the captions, the outro — is identical.
     "annotations": [                  // one beat each
       {"rows": [3, 7],                // cells, half-open: 3..6, so last_row + 1
        "cols": [0.2, 62.5],           // optional, defaults to the full width
+       "shot": "rest",                // optional; else the final capture
+       "camera": "fit",               // optional; frame the rect, not the width
+       "hold": 4.4,                   // optional; else timing.hold
        "head": "Short claim",
-       "sub": "the mechanism, lower case"}
+       "sub": "the mechanism, lower case"},
+      {"shots": ["rest", "s1", "s2"], // a run of screens, stepped across the hold
+       "band": false,                 // no dimming, no frame: the screen alone
+       "rows": [19, 42],              // still steers the camera
+       "head": "It follows", "sub": "the movement is the point"}
     ]
   },
   "encode": {"crf": 18, "preset": "slow"}
 }
 ```
 
-Duration is `intro + zoom + n*hold + (n-1)*pan + outro`; three annotations at
-the defaults gives 10.1s. Set any timing to `0` to drop that beat.
+Duration is `intro + zoom + sum(hold) + (n-1)*pan + outro`; three annotations at
+the defaults gives 10.1s. Set any timing to `0` to drop that beat, or give one
+beat its own `hold` when it has more to show than the others.
+
+## Framing a beat
+
+By default the camera fits the capture across the frame and travels only up and
+down, which is what a clip of one tall screen wants. `"camera": "fit"` frames a
+beat on its own rect instead — centred in both axes, scaled to fill the
+viewport — which is how a narrow column at one edge is brought to the middle.
+Nothing clamps it back inside the capture: the ground beyond the edge paints as
+background, and that emptiness is what says *this is a detail of a bigger
+screen*. A tall, narrow rect in a wide frame will leave a lot of it, since the
+scale that fits its height is nowhere near the scale that fills the width.
+
+## Shots: more than one screen in one clip
+
+A clip is stills with a camera over them, so nothing on screen moves by
+itself — but the *screens* need not all be the same one. A `{"shot": "name"}`
+step in `capture.keys` saves the screen at that point in the sequence, and a
+beat's `"shot": "name"` says it is drawn on that one; a beat without a `shot`
+gets the final capture. The pan into a beat cross-fades to its screen, so the
+0.5s between two beats is where a caret moves, a list scrolls, or a selection
+jumps — the move, shown rather than described. Take a shot after the screen
+has settled (a `{"sleep": n}` before it), and remember every shot comes from
+one run of one terminal, so they all share the geometry the `render.rows` /
+`render.cols` grid describes.
+
+A shot whose name looks like a path stays a path, which is how a run drops a
+capture next to a dump of the same screen.
+
+`"shots": [...]` on a beat plays a whole run of them across its dwell, each held
+then cut to the next. That is the shape for a repeated action — page down eight
+times, screenshot each — where no single frame makes the point and the movement
+between them does. Pair it with `"band": false`: a beat whose subject is a thing
+moving does not want a rectangle drawn around where it used to be.
 
 Two things worth getting right when authoring: capture more rows than fit on
 screen, since the clip pans vertically over the capture; and park the caret on a
