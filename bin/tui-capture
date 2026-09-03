@@ -109,7 +109,17 @@ sleep 0.5
 for a in "${ACTIONS[@]:-}"; do
   [[ -n "$a" ]] || continue
   case "$a" in
-    key:*)   xdotool key   --window "$WID" "${a#key:}"; sleep 1.2 ;;
+    key:*)   spec="${a#key:}"
+             if [[ "$spec" == *"*"* ]]; then
+               # NAME*N -- N presses back to back. A scroll driven one press
+               # per action would spend a minute on what the program does in
+               # a second, and would land as N jumps rather than one travel.
+               xdotool key --window "$WID" --repeat "${spec##*\*}" \
+                       --repeat-delay 40 "${spec%%\**}"
+               sleep 0.4
+             else
+               xdotool key --window "$WID" "$spec"; sleep 1.2
+             fi ;;
     type:*)  xdotool type  --window "$WID" --delay 40 "${a#type:}"; sleep 1.2 ;;
     sleep:*) sleep "${a#sleep:}" ;;
     shot:*)  mkdir -p "$(dirname "${a#shot:}")"

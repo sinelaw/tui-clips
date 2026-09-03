@@ -32,7 +32,21 @@ def expand(value: str, ctx: dict) -> str:
     return os.path.expandvars(os.path.expanduser(value))
 
 
-def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str) -> None:
+def shot_path(shot: str, pane: str, shots_dir: str, ctx: dict) -> str:
+    """where a `{"shot": ...}` step writes.
+
+    A bare word is a *name*: the shot is one of the screens this clip is drawn
+    on, and `render.annotations[i].shot` picks it by that name. Anything that
+    looks like a path stays one, which is how a run drops a capture next to a
+    dump of the same screen.
+    """
+    if "/" in shot or "{" in shot:
+        return expand(shot, ctx)
+    return os.path.join(shots_dir, f"{pane}-{shot}.png")
+
+
+def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
+            shots_dir: str) -> None:
     cap = spec["capture"]
     p = cap["panes"][pane]
     ctx = {"scratch": scratch, "proj": proj, "pane": pane}
@@ -52,13 +66,15 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str) -> Non
         argv += ["--env", f"{k}={expand(v, ctx)}"]
     for step in [*cap.get("keys", []), *p.get("keys", [])]:
         if "key" in step:
-            argv += ["--key", step["key"]]
+            # {"key": "Down", "repeat": 12} -> one travel, not twelve jumps
+            rep = int(step.get("repeat", 1))
+            argv += ["--key", f"{step['key']}*{rep}" if rep > 1 else step["key"]]
         elif "type" in step:
             argv += ["--type", step["type"]]
         elif "sleep" in step:
             argv += ["--sleep", str(step["sleep"])]
         elif "shot" in step:
-            argv += ["--shot", expand(step["shot"], ctx)]
+            argv += ["--shot", shot_path(step["shot"], pane, shots_dir, ctx)]
     argv += ["--"] + [expand(a, ctx) for a in p["argv"]]
     print(f"  capturing {pane} ...", flush=True)
     subprocess.run(argv, check=True, stdout=subprocess.DEVNULL)
@@ -78,6 +94,7 @@ def main() -> None:
     mode = render.mode_of(spec)          # validates the pane set
     outdir = os.path.join(ROOT, "out", name)
     frames = os.path.join(outdir, "frames")
+    shots_dir = os.path.join(outdir, "shots")
     os.makedirs(outdir, exist_ok=True)
 
     panes = list(spec["capture"]["panes"])
@@ -90,9 +107,14 @@ def main() -> None:
         proj = os.path.join(scratch, "proj")
         shutil.rmtree(scratch, ignore_errors=True)
         os.makedirs(proj, exist_ok=True)
-        for src in spec["capture"].get("copy_files", []):
-            src = expand(src, {})
-            shutil.copy(src, os.path.join(proj, os.path.basename(src)))
+        shutil.rmtree(shots_dir, ignore_errors=True)
+        os.makedirs(shots_dir, exist_ok=True)
+        for entry in spec["capture"].get("copy_files", []):
+            # a string copies under its own name; {"src", "as"} renames, for a
+            # doc whose real filename would read wrong in the file explorer
+            as_ = entry.get("as") if isinstance(entry, dict) else None
+            src = expand(entry["src"] if isinstance(entry, dict) else entry, {})
+            shutil.copy(src, os.path.join(proj, as_ or os.path.basename(src)))
         # A program that reads a config directory shows a different UI with and
         # without one, so a clip that wants the real look has to bring a copy —
         # a copy, so the run cannot write back over the real thing.
@@ -102,23 +124,31 @@ def main() -> None:
                             ignore=shutil.ignore_patterns(".git", "logs"))
         try:
             for pane in panes:
-                capture(spec, pane, captures[pane], proj, scratch)
+                capture(spec, pane, captures[pane], proj, scratch, shots_dir)
         finally:
             # one Xvfb for every pane; tear it down however we got here
             subprocess.run([os.path.join(ROOT, "bin", "tui-capture"), "--stop",
                             "--display", spec["capture"].get("display", ":99")],
                            check=False)
 
-    for f in captures.values():
+    shots = {}
+    for pane in panes:
+        for step in [*spec["capture"].get("keys", []),
+                     *spec["capture"]["panes"][pane].get("keys", [])]:
+            n = step.get("shot") if isinstance(step, dict) else None
+            if n and "/" not in n and "{" not in n:
+                shots[n] = shot_path(n, pane, shots_dir, {})
+
+    for f in [*captures.values(), *shots.values()]:
         if not os.path.exists(f):
             raise SystemExit(f"missing capture {f} (drop --skip-capture?)")
     if args.stills:
-        for f in captures.values():
+        for f in [*captures.values(), *shots.values()]:
             print(f)
         return
 
     print(f"  rendering frames ({mode}) ...", flush=True)
-    r = render.make(spec, captures, frames)
+    r = render.make(spec, captures, frames, shots)
     nf = r.run()
     dur = nf / r.fps
     print(f"  {nf} frames, {dur:.2f}s")

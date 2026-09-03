@@ -86,15 +86,17 @@ def subject_pane(spec: dict) -> str:
     return "after" if mode_of(spec) == "compare" else next(iter(panes))
 
 
-def make(spec: dict, captures: dict[str, str], outdir: str):
+def make(spec: dict, captures: dict[str, str], outdir: str,
+         shots: dict[str, str] | None = None):
     """the renderer this spec asks for"""
     if mode_of(spec) == "explode":
         return ExplodeRenderer(spec, captures, outdir)
-    return Renderer(spec, captures, outdir)
+    return Renderer(spec, captures, outdir, shots)
 
 
 class Renderer:
-    def __init__(self, spec: dict, captures: dict[str, str], outdir: str):
+    def __init__(self, spec: dict, captures: dict[str, str], outdir: str,
+                 shots: dict[str, str] | None = None):
         r = spec["render"]
         self.spec = spec
         self.r = r
@@ -111,6 +113,21 @@ class Renderer:
                     "both panes must use the same --geometry and --font"
                 )
         self.IW, self.IH = self.A.size
+
+        # Named shots: screens taken part-way through the key sequence, so one
+        # clip can show a caret move and what it did. A beat's `shot` picks
+        # one; the pan into that beat cross-fades to it, which is the move.
+        # Every shot is the same terminal, so they share the capture's grid —
+        # a differing size means a differing --geometry or --font, and the
+        # camera arithmetic would be wrong for one of them.
+        self.shots = {}
+        for nm, path in (shots or {}).items():
+            img = Image.open(path).convert("RGB")
+            if img.size != self.A.size:
+                raise SystemExit(
+                    f"shot {nm!r} is {img.size}, capture is {self.A.size}; "
+                    "every shot must come from the same run")
+            self.shots[nm] = img
 
         self.rows = int(r["rows"])
         self.cols = int(r["cols"])
@@ -137,6 +154,11 @@ class Renderer:
         self.ann = r["annotations"]
         if not self.ann:
             raise SystemExit("render.annotations is empty; nothing to show")
+        for a in self.ann:
+            if a.get("shot") and a["shot"] not in self.shots:
+                raise SystemExit(
+                    f"annotation shot {a['shot']!r} was never taken; add "
+                    f'{{"shot": "{a["shot"]}"}} to capture.keys')
         self.cap_intro = r.get("intro_caption", ["", ""])
         self.cap_outro = r.get("outro_caption", ["", ""])
         lb = dict(DEFAULT_LABELS)
@@ -173,10 +195,22 @@ class Renderer:
         self._cache: dict = {}
 
     # -- geometry helpers ---------------------------------------------------
+    def hold(self, i: int) -> float:
+        """beat i's dwell -- its own `hold`, else the clip's"""
+        return float(self.ann[i].get("hold", self.t["hold"]))
+
     def total(self) -> float:
         n = len(self.ann)
-        return (self.t["intro"] + self.t["zoom"] + self.t["hold"] * n
+        return (self.t["intro"] + self.t["zoom"]
+                + sum(self.hold(i) for i in range(n))
                 + self.t["pan"] * max(0, n - 1) + self.t["outro"])
+
+    def rect(self, i: int):
+        """annotation i's rect in source pixels -- (x0, y0, x1, y1)"""
+        a = self.ann[i]
+        r0, r1 = a["rows"]
+        c0, c1 = a.get("cols", [0, self.cols])
+        return (c0 * self.CW, r0 * self.RH, c1 * self.CW, r1 * self.RH)
 
     def ann_cy(self, i: int) -> float:
         """source-y that centres annotation i, clamped inside the image"""
@@ -187,17 +221,77 @@ class Renderer:
             return self.IH / 2
         return max(half, min(self.IH - half, cy))
 
-    def band(self, i: int, py: float, s: float):
+    # How much of the frame a `camera: "fit"` beat leaves around its rect. The
+    # band is drawn 6px outside the rect, its outline 3px wide, and the accent
+    # tick another 12px left of that, so anything under ~24 clips the marks the
+    # beat is made of.
+    FIT_PAD = 56
+
+    def cam(self, i: int):
+        """beat i's camera -- (scale, source-x centred, source-y centred).
+
+        The default frames the capture across the full width and travels only
+        up and down, which is what a clip of one tall screen wants. A beat that
+        asks to `fit` is framed on its own rect instead: the rect is centred in
+        both axes and scaled to fill the viewport, so a narrow column can be
+        brought to the middle of a wide frame. Nothing clamps it back inside
+        the capture -- the ground beyond the edge is the point, and it paints
+        as background.
+        """
+        if self.ann[i].get("camera") != "fit":
+            return self.s_c, self.IW / 2, self.ann_cy(i)
+        x0, y0, x1, y1 = self.rect(i)
+        pad = 2 * self.FIT_PAD
+        s = min((self.vp[2] - pad) / max(1.0, x1 - x0),
+                (self.vp[3] - pad) / max(1.0, y1 - y0))
+        return s, (x0 + x1) / 2, (y0 + y1) / 2
+
+    # Of each shot's slot in a run, the share spent dissolving into the next.
+    # Zero by default: a dissolve between two screens that differ by more than
+    # a line or two is a double exposure, not a movement. A run wanting the
+    # softer join sets `crossfade` on the beat.
+    STEP_XF = 0.0
+
+    def shot(self, i: int, hp: float = 0.0):
+        """what beat i is drawn on at hold-progress `hp`.
+
+        -> (image, tag) or, mid-step, (imageA, tagA, imageB, tagB, blend). A
+        beat with `shots` walks that list across its dwell; one with `shot`
+        holds a single screen; one with neither gets the final capture.
+        """
         a = self.ann[i]
-        r0, r1 = a["rows"]
-        c0, c1 = a.get("cols", [0, self.cols])
-        return (c0 * self.CW * s - 6, py + r0 * self.RH * s - 6,
-                c1 * self.CW * s + 6, py + r1 * self.RH * s + 6)
+        run = a.get("shots")
+        if not run:
+            nm = a.get("shot")
+            return (self.shots[nm], f"shot:{nm}") if nm else (self.A, "A")
+        n = len(run)
+        f = min(hp, 0.999999) * n
+        k = min(int(f), n - 1)
+        frac = f - k
+        xf = float(a.get("crossfade", self.STEP_XF))
+        cur = (self.shots[run[k]], f"shot:{run[k]}")
+        if k + 1 >= n or xf <= 0 or frac <= 1 - xf:
+            return cur
+        nxt = (self.shots[run[k + 1]], f"shot:{run[k + 1]}")
+        return (*cur, *nxt, (frac - (1 - xf)) / xf)
+
+    def screen(self, i: int, hp: float, s: float):
+        """beat i's scaled screen at hold-progress `hp`"""
+        sh = self.shot(i, hp)
+        base = self.scaled(sh[0], s, sh[1])
+        if len(sh) == 5:
+            base = Image.blend(base, self.scaled(sh[2], s, sh[3]), sh[4])
+        return base
+
+    def band(self, i: int, px: float, py: float, s: float):
+        x0, y0, x1, y1 = self.rect(i)
+        return (px + x0 * s - 6, py + y0 * s - 6,
+                px + x1 * s + 6, py + y1 * s + 6)
 
     def scaled(self, img, s: float, tag: str):
         key = (tag, round(s, 4))
         if key not in self._cache:
-            if len(self._cache) > 6:
+            if len(self._cache) > 16:
                 self._cache.clear()
             self._cache[key] = img.resize(
                 (int(round(self.IW * s)), int(round(self.IH * s))), Image.LANCZOS)
@@ -215,39 +309,48 @@ class Renderer:
         return nf
 
     def phase(self, t: float):
-        """-> (zoom progress p, annotation index, pan progress, outro progress)"""
+        """-> (zoom p, annotation index, pan progress, outro progress, hold progress)
+
+        The last value is how far through beat i's own dwell we are, 0..1. A
+        beat that plays several shots steps through them on it.
+        """
         T = self.t
         if t < T["intro"]:
-            return 0.0, 0, 0.0, 0.0
+            return 0.0, 0, 0.0, 0.0, 0.0
         if T["zoom"] > 0 and t < T["intro"] + T["zoom"]:
-            return ease((t - T["intro"]) / T["zoom"]), 0, 0.0, 0.0
+            return ease((t - T["intro"]) / T["zoom"]), 0, 0.0, 0.0, 0.0
         u = t - T["intro"] - T["zoom"]
         last = len(self.ann) - 1
         for i in range(len(self.ann)):
-            seg = T["hold"] + (T["pan"] if i < last else 0)
+            hold = self.hold(i)
+            seg = hold + (T["pan"] if i < last else 0)
             if u < seg:
-                pan = (0.0 if u < T["hold"] or T["pan"] <= 0
-                       else ease((u - T["hold"]) / T["pan"]))
-                return 1.0, i, pan, 0.0
+                pan = (0.0 if u < hold or T["pan"] <= 0
+                       else ease((u - hold) / T["pan"]))
+                hp = min(1.0, u / hold) if hold > 0 else 1.0
+                return 1.0, i, pan, 0.0, hp
             u -= seg
-        return 1.0, last, 0.0, ease(u / T["outro"]) if T["outro"] > 0 else 1.0
+        return (1.0, last, 0.0,
+                ease(u / T["outro"]) if T["outro"] > 0 else 1.0, 1.0)
 
     def frame(self, n: int) -> Image.Image:
         th, W, H = self.th, self.W, self.H
         t = n / self.fps
-        p, ai, pan, rel = self.phase(t)
+        p, ai, pan, rel, hp = self.phase(t)
         nxt = min(ai + 1, len(self.ann) - 1)
 
         cv = Image.new("RGB", (W, H), th["bg"])
         d = ImageDraw.Draw(cv)
 
-        s = lerp(self.s_a, self.s_c, p)
+        s_i, cx_i, cy_i = self.cam(ai)
+        s_j, cx_j, cy_j = self.cam(nxt)
+        s = lerp(self.s_a, lerp(s_i, s_j, pan), p)
         cw = lerp(self.panel_w, self.vp[2], p)
         ch = lerp(self.panel_h, self.vp[3], p)
         cx = lerp(self.ax + self.panel_w / 2, self.vp[0] + self.vp[2] / 2, p)
         cy = lerp(self.panel_y + self.panel_h / 2, self.vp[1] + self.vp[3] / 2, p)
-        src_cy = lerp(self.IH / 2,
-                      lerp(self.ann_cy(ai), self.ann_cy(nxt), pan), p)
+        src_cx = lerp(self.IW / 2, lerp(cx_i, cx_j, pan), p)
+        src_cy = lerp(self.IH / 2, lerp(cy_i, cy_j, pan), p)
 
         # BEFORE panel, sliding out to the left (comparison clips only)
         if self.B is not None and p < 1.0:
@@ -264,15 +367,24 @@ class Renderer:
         # subject panel, growing from the intro shot to the full viewport
         cwi, chi = int(round(cw)), int(round(ch))
         lay = Image.new("RGB", (cwi, chi), th["bg"])
-        px = int(round(cwi / 2 - self.IW / 2 * s))
+        px = int(round(cwi / 2 - src_cx * s))
         py = int(round(chi / 2 - src_cy * s))
-        lay.paste(self.scaled(self.A, s, "A"), (px, py))
+        base = self.screen(ai, 1.0 if pan > 0 else hp, s)
+        if pan > 0:
+            nb = self.screen(nxt, 0.0, s)
+            if nb is not base:
+                base = Image.blend(base, nb, pan)
+        lay.paste(base, (px, py))
 
-        dim = int(150 * min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel))
+        # A beat with `band: false` is the screen alone -- nothing dimmed and
+        # no frame drawn -- for a run of shots whose own movement is the point.
+        lit = lerp(0.0 if self.ann[ai].get("band") is False else 1.0,
+                   0.0 if self.ann[nxt].get("band") is False else 1.0, pan)
+        dim = int(150 * min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel) * lit)
         if dim > 3:
-            b = self.band(ai, py, s)
+            b = self.band(ai, px, py, s)
             if pan > 0:
-                b2 = self.band(nxt, py, s)
+                b2 = self.band(nxt, px, py, s)
                 b = tuple(lerp(b[k], b2[k], pan) for k in range(4))
             ov = Image.new("RGBA", lay.size, (0, 0, 0, dim))
             ImageDraw.Draw(ov).rounded_rectangle(list(b), radius=10, fill=(0, 0, 0, 0))
@@ -280,7 +392,7 @@ class Renderer:
             lay.alpha_composite(ov)
             lay = lay.convert("RGB")
             ld = ImageDraw.Draw(lay)
-            g = fade(th["after"], int(255 * (1.0 - rel)))
+            g = fade(th["after"], int(255 * (1.0 - rel) * lit))
             ld.rounded_rectangle(list(b), radius=10, outline=g, width=3)
             ld.rectangle([b[0] - 12, b[1], b[0] - 7, b[3]], fill=g)
 
