@@ -11,15 +11,21 @@ Python with Pillow. Runs headless — no X session, and nothing touches the
 terminal or editor you have open.
 
 ```sh
-./bin/tui-clip specs/fresh-markdown-compose.json   # -> out/<name>.mp4
+./bin/tui-clip ~/repos/fresh/scripts/clips/fresh-markdown-compose.json
+# -> out/<name>.mp4
 ```
+
+A spec goes stale when the program it films changes its layout, so specs live
+with the program, not here. The worked examples below are fresh's, in
+[`scripts/clips`](https://github.com/sinelaw/fresh/tree/master/scripts/clips);
+a spec path is any path, so yours can live wherever its subject does.
 
 About 75s: ~25s capturing, ~40s rendering frames, ~10s encoding. While
 iterating:
 
 ```sh
-./bin/tui-clip specs/mine.json --stills         # capture only, check framing
-./bin/tui-clip specs/mine.json --skip-capture   # re-render from cached captures
+./bin/tui-clip mine.json --stills        # capture only, check framing
+./bin/tui-clip mine.json --skip-capture  # re-render from cached captures
 ./bin/tui-grid out/mine/after.png --rows 50 --cols 64 --parts 2
 ```
 
@@ -30,17 +36,17 @@ are written in those same cells, so you read the numbers straight off it.
 
 **Comparison** — panes named `before` and `after`. Both captures appear side by
 side, the BEFORE panel swipes out left, the AFTER zooms to full frame, then one
-annotated beat per callout. See `specs/fresh-markdown-compose.json`.
+annotated beat per callout. See fresh's `fresh-markdown-compose.json`.
 
 **Solo** — one pane, any name, for a feature with nothing to compare against.
 The capture opens centred as an establishing shot, grows in place to fill the
-frame, then the same annotated beats. See `specs/fresh-markdown-compose-solo.json`.
+frame, then the same annotated beats. See fresh's `fresh-markdown-compose-solo.json`.
 
 **Explode** — one pane, plus a `render.explode` section naming rects on the
 screen. The capture comes apart: every named piece is cut out of it and slides
 away, and the camera then visits each piece in turn. A piece that has pieces of
 its own bursts open in place when the camera reaches it, so a screen can be
-taken apart down as many levels as it has. See `specs/fresh-ui-anatomy.json`.
+taken apart down as many levels as it has. See fresh's `fresh-ui-anatomy.json`.
 
 Cut out, not faded out: the original does not stay behind the pieces, and a
 piece drawn over by another loses those pixels to a hole. A capture is flat, so
@@ -198,14 +204,26 @@ Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
 
 Reading two dozen nested rects off a grid by hand is not worth doing. If the
 program can report its own layout, `tui-tree` turns that report into pieces.
-`fresh` writes its retained UI tree as JSON — one object per element, with the
-rect the layout gave it — from **Dump UI Tree** in the command palette. Get the
-JSON out of the editor with `ctrl+a`, `ctrl+n`, `ctrl+v`, then save it.
+It wants that report as JSON — one object per element, carrying the rect the
+layout gave it, an `id` and a `key` to name it by, `type` and `text` if it has
+them, and `children`:
+
+```jsonc
+{"id": "E5", "type": "Box", "key": "chrome_column",
+ "rect": {"x": 0, "y": 0, "w": 127, "h": 36}, "children": [...]}
+```
+
+Getting a program to emit that is the program's own business, and belongs in
+its notes rather than here — fresh's are in
+[`scripts/clips`](https://github.com/sinelaw/fresh/tree/master/scripts/clips).
+One rule generalizes, though: a dump taken from a command you invoked through
+some overlay describes the frame with that overlay over everything, so take it
+the way the program lets you take it without one.
 
 ```sh
 ./bin/tui-tree tree.json --list                 # every element that has a key
 ./bin/tui-tree tree.json --list --all --grep pane
-./bin/tui-tree tree.json plan.json --into specs/mine.json
+./bin/tui-tree tree.json plan.json --into mine.json
 ```
 
 A *plan* names elements and says what to call them; the dump supplies the
