@@ -95,6 +95,7 @@ the dimmed bands, the captions, the outro — is identical.
     "rows": 50, "cols": 64,           // must match capture geometry
     "title": "app - feature",
     "labels": {"before": "BEFORE", "after": "AFTER", "solo": "NEW"},
+    "views": {"old": {"rows": [2, 24], "cols": [0, 62]}},   // camera rects
     "intro_caption": ["Same file, same width", "only the rendering changed"],
     "outro_caption": ["app", "github.com/you/app"],
     "timing": {"intro": 2.1, "zoom": 0.8,
@@ -106,6 +107,7 @@ the dimmed bands, the captions, the outro — is identical.
        "cols": [0.2, 62.5],           // optional, defaults to the full width
        "shot": "rest",                // optional; else the final capture
        "camera": "fit",               // optional; frame the rect, not the width
+       "view": "old",                 // ... or sit on a named rect and not move
        "hold": 4.4,                   // optional; else timing.hold
        "head": "Short claim",
        "sub": "the mechanism, lower case"},
@@ -141,6 +143,20 @@ Nothing clamps it back inside the capture: the ground beyond the edge paints as
 background, and that emptiness is what says *this is a detail of a bigger
 screen*. A tall, narrow rect in a wide frame will leave a lot of it, since the
 scale that fits its height is nowhere near the scale that fills the width.
+
+`"view"` names a rect in `render.views` and frames *that* instead, leaving the
+beat's own rows and cols to say what the band points at. Beats sharing a view
+share a camera, so nothing moves between them but the band and the note — and
+that is what a clip of one screen usually wants. A camera that re-frames every
+beat asks the reader to find their place again every beat, and re-reading the
+same function from a new scale is not what the 1.5s is for; it also never lets
+them see the shape of the whole thing, which for a clip about what code *looks
+like* is the whole argument. Frame the function once, then point at it.
+
+Give the view a few rows of slack past the code: a note under the last beat is
+drawn below its rect, and the fit only leaves `FIT_PAD` outside the view. A
+note with nowhere to go flips to the other side of its rect rather than run off
+the frame, but slack is the better answer.
 
 ## Notes: saying it beside the thing
 

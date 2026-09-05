@@ -162,9 +162,18 @@ class Renderer:
         self.t.update(given)
 
         self.ann = r["annotations"]
+        # A named rect for the camera to sit on. Beats that share one share a
+        # camera, so nothing moves between them but the band and the note --
+        # which is what a clip of a static screen wants: a screen that pans
+        # every 1.5s asks the reader to re-find their place every 1.5s, and
+        # the thing that moved was never the code.
+        self.views = r.get("views", {})
         if not self.ann:
             raise SystemExit("render.annotations is empty; nothing to show")
         for a in self.ann:
+            if a.get("view") and a["view"] not in self.views:
+                raise SystemExit(
+                    f"annotation view {a['view']!r} is not in render.views")
             if a.get("shot") and a["shot"] not in self.shots:
                 raise SystemExit(
                     f"annotation shot {a['shot']!r} was never taken; add "
@@ -242,12 +251,15 @@ class Renderer:
         a = self.ann[j if pan >= 0.5 else i]
         return a.get("label", self.lead), self.th[a.get("tone", "after")]
 
-    def rect(self, i: int):
-        """annotation i's rect in source pixels -- (x0, y0, x1, y1)"""
-        a = self.ann[i]
+    def rect_of(self, a: dict):
+        """a {rows, cols} rect in source pixels -- (x0, y0, x1, y1)"""
         r0, r1 = a["rows"]
         c0, c1 = a.get("cols", [0, self.cols])
         return (c0 * self.CW, r0 * self.RH, c1 * self.CW, r1 * self.RH)
+
+    def rect(self, i: int):
+        """annotation i's rect in source pixels"""
+        return self.rect_of(self.ann[i])
 
     def ann_cy(self, i: int) -> float:
         """source-y that centres annotation i, clamped inside the image"""
@@ -281,10 +293,19 @@ class Renderer:
         the capture -- the ground beyond the edge is the point, and it paints
         as background.
         """
-        if self.ann[i].get("camera") != "fit":
-            return self.s_c, self.IW / 2, self.ann_cy(i)
         a = self.ann[i]
-        x0, y0, x1, y1 = self.rect(i)
+        if a.get("view"):
+            # The author framed this one; the beat's own rect is what the band
+            # points at, not what the camera sits on.
+            return self.fit(self.rect_of(self.views[a["view"]]))
+        if a.get("camera") != "fit":
+            return self.s_c, self.IW / 2, self.ann_cy(i)
+        return self.fit(self.rect(i), a)
+
+    def fit(self, rect, a: dict | None = None):
+        """(scale, source-x, source-y) that frames `rect` in the viewport"""
+        a = a or {}
+        x0, y0, x1, y1 = rect
         pad = 2 * self.FIT_PAD
         note = bool(a.get("note"))
         room = self.NOTE_ROOM if note else 0
@@ -373,7 +394,6 @@ class Renderer:
         # where the leader lands on the rect: in from the corner nearest the
         # note, so the last segment runs alongside the rows it points at
         px = min(x1 - 10, max(x0 + 10, x1 - 48 if right else x0 + 48))
-        py = y1 if below else y0
 
         pd = self.NOTE_PAD
         tw = ld.textlength(note, font=self.f_note)
@@ -384,8 +404,20 @@ class Renderer:
         # keep the words on the canvas; the leader stretches instead
         tx = min(cw - 40 - pd - tw, max(40.0 + pd, tx))
         rx = tx - 20 if right else tx + tw + 20
-        ty0 = (y1 + self.NOTE_GAP) if below else (y0 - self.NOTE_GAP - th_)
-        ty1 = ty0 + th_
+        # A static camera frames a whole function, so a beat near its foot has
+        # no room under it. Flip rather than run off the frame: the note is
+        # for reading, and half a note below the edge is none.
+        def place(down):
+            t0 = (y1 + self.NOTE_GAP) if down else (y0 - self.NOTE_GAP - th_)
+            return t0, t0 + th_
+        ty0, ty1 = place(below)
+        if below and ty1 + pd > ch - 20:
+            below = False
+            ty0, ty1 = place(False)
+        elif not below and ty0 - pd < 20:
+            below = True
+            ty0, ty1 = place(True)
+        py = y1 if below else y0
 
         col = (*tone, alpha)
         # A plate under the words. They sit over dimmed code, and dimmed code
