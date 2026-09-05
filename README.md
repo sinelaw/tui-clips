@@ -99,7 +99,9 @@ the dimmed bands, the captions, the outro — is identical.
     "title_card": {                           // a card before the clip
       "lines": [{"text": "Horrible Code", "effect": "sick", "at": 0.04},
                 {"text": "to", "small": true, "at": 0.34},
-                {"text": "Declarative", "effect": "shine", "at": 0.50}]},
+                {"text": "Declarative", "effect": "shine", "at": 0.50}],
+      "footer": {"added": 63164, "removed": 27662, "at": 0.62,
+                 "note": "the scale this is one example of"}},
     "views": {"old": {"rows": [2, 24], "cols": [0, 62]}},   // camera rects
     "intro_caption": ["Same file, same width", "only the rendering changed"],
     "outro_caption": ["app", "github.com/you/app"],
@@ -176,6 +178,23 @@ line a couple of pixels: the colour of code nobody wants to touch. `shine`
 fills them with cool metal and runs one specular highlight across, built once
 as a horizontal profile and sheared rather than evaluated per pixel. A line
 with no effect is set smaller, in the muted colour, for the word between.
+
+A `footer` puts a diffstat under them -- `added` and `removed`, in the theme's
+`after` and `before`, which are the colours a diff uses anyway -- with an
+optional `note` beneath. It is the one line of a card that is a measurement
+rather than a claim, which is what makes the claim above it land.
+
+## The edges of a capture
+
+A terminal capture is cut, not framed: the sides end where the text does, but
+the rows above and below are the same rows going on, and a hard edge there
+reads as a boundary the code does not have. So the subject is vignetted
+throughout -- blurred *and* taken back to the ground, since fading alone
+leaves the last legible row hanging in mid-air and blurring alone leaves a
+smear with a hard edge under it. Deeper on the top and bottom than the sides,
+for the same reason. Its strength follows the zoom, so the intro's framed
+panel keeps the crisp border it is drawn with. `VIG_X`, `VIG_Y` and
+`VIG_BLUR` on the renderer are the knobs.
 
 ## Notes: saying it beside the thing
 

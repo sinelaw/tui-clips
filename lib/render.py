@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 import os
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 BOLD = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 MONO = "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"
@@ -172,6 +172,12 @@ class Renderer:
         # A card before the clip: a few lines, each with an effect of its own.
         # It is the only place the renderer says anything in its own voice, so
         # it is also the only place with an effect that is not a camera move.
+        # Edges that fall off instead of stopping: the capture is a window
+        # onto a screen that carries on past it, and a hard rectangular cut
+        # says the opposite -- that what you can see is all there is.
+        vg = r.get("vignette")
+        self.vignette = ({} if vg is True else dict(vg)) if vg else None
+        self._vmask: dict = {}
         self.card = r.get("title_card")
         if self.card and not self.t.get("title"):
             self.t["title"] = 2.6
@@ -450,6 +456,98 @@ class Renderer:
         ld.rectangle([px - 6, py - 6, px + 6, py + 6], fill=col)
         ld.text((tx, ty0), note, font=self.f_note, fill=(*self.th["fg"], alpha))
 
+    # How far in from each edge the picture gives up, as a fraction of that
+    # side. Taller on the top and bottom because that is where a terminal
+    # capture is cut: the sides end at the text, but the rows above and below
+    # are the same rows going on, and a hard edge there reads as a boundary
+    # the code does not have.
+    VIG_X, VIG_Y, VIG_BLUR = 0.085, 0.165, 9
+
+    def vignette(self, size):
+        """a mask: opaque in the middle, gone at the edges"""
+        key = ("vig", size)
+        if key not in self._cache:
+            w, h = size
+
+            def ramp(n, frac):
+                g = Image.new("L", (n, 1))
+                px, band = g.load(), max(1.0, n * frac)
+                for i in range(n):
+                    t = min(min(i, n - 1 - i) / band, 1.0)
+                    px[i, 0] = int(255 * (t * t * (3 - 2 * t)))   # smoothstep
+                return g
+
+            gx = ramp(w, self.VIG_X).resize((w, h))
+            gy = ramp(h, self.VIG_Y).rotate(90, expand=True).resize((w, h))
+            if len(self._cache) > 16:
+                self._cache.clear()
+            self._cache[key] = ImageChops.multiply(gx, gy)
+        return self._cache[key]
+
+    def vignetted(self, lay, p: float):
+        """`lay` with its edges blurred and taken back to the ground.
+
+        Both, not either: fading alone leaves the last legible row hanging in
+        mid-air, and blurring alone leaves a smear with a hard edge under it.
+        Strength follows the zoom, so the intro's framed panel keeps the crisp
+        border it is drawn with.
+        """
+        if p <= 0.02:
+            return lay
+        v = self.vignette(lay.size)
+        if p < 0.999:
+            v = v.point(lambda t: int(255 - (255 - t) * p))
+        lay = Image.composite(lay, lay.filter(
+            ImageFilter.GaussianBlur(self.VIG_BLUR)), v)
+        return Image.composite(
+            lay, Image.new("RGB", lay.size, self.th["bg"]), v)
+
+    def vmask(self, size):
+        """the falloff, cached per panel size.
+
+        Stronger top and bottom than left and right: a clip of code pans
+        vertically, so those are the edges the eye keeps arriving at, and the
+        ones a hard cut keeps stopping it at.
+        """
+        if size in self._vmask:
+            return self._vmask[size]
+        v = self.vignette or {}
+        w, h = size
+        mx = max(1, int(w * float(v.get("side", 0.06))))
+        my = max(1, int(h * float(v.get("edge", 0.15))))
+        # one row and one column of falloff, multiplied into a full mask by
+        # resizing each to the panel and compositing -- cheaper than, and
+        # identical to, evaluating the product per pixel
+        col = Image.new("L", (w, 1), 255)
+        px = col.load()
+        for x in range(mx):
+            k = int(255 * ease(x / mx))
+            px[x, 0] = k
+            px[w - 1 - x, 0] = k
+        row = Image.new("L", (1, h), 255)
+        py = row.load()
+        for y in range(my):
+            k = int(255 * ease(y / my))
+            py[0, y] = k
+            py[0, h - 1 - y] = k
+        m = ImageChops.multiply(col.resize(size), row.resize(size))
+        self._vmask.clear()
+        self._vmask[size] = m
+        return m
+
+    def vignetted(self, lay, strength: float):
+        """`lay` with its edges blurred and faded back toward the ground"""
+        if not self.vignette or strength <= 0.02:
+            return lay
+        v = self.vignette
+        edge = lay.filter(ImageFilter.GaussianBlur(float(v.get("blur", 7))))
+        edge = Image.blend(edge, Image.new("RGB", lay.size, self.th["bg"]),
+                           float(v.get("fade", 0.6)))
+        m = self.vmask(lay.size)
+        if strength < 1.0:
+            m = m.point(lambda k: int(255 - (255 - k) * strength))
+        return Image.composite(lay, edge, m)
+
     def scaled(self, img, s: float, tag: str):
         key = (tag, round(s, 4))
         if key not in self._cache:
@@ -594,6 +692,31 @@ class Renderer:
             y += m.height
 
         d = ImageDraw.Draw(cv)
+        foot = self.card.get("footer")
+        if foot:
+            # The diffstat, in the colours a diff uses, because that is the
+            # one line of the card that is a measurement rather than a claim
+            # -- and the claim under it is that all of this is one example
+            # out of that.
+            fa = ease(max(0.0, min(1.0, (u - float(foot.get("at", 0.62)))
+                                   / 0.16))) * fade
+            if fa > 0.004:
+                big = ImageFont.truetype(BOLD, int(self.W * 0.044))
+                small = ImageFont.truetype(BOLD, int(self.W * 0.026))
+                plus = f"+{int(foot['added']):,}"
+                minus = f"-{int(foot['removed']):,}"
+                gap = int(self.W * 0.030)
+                wp, wm = d.textlength(plus, font=big), d.textlength(minus, font=big)
+                sy = H * 0.755
+                x = (W - (wp + gap + wm)) / 2
+                d.text((x, sy), plus, font=big,
+                       fill=fade_c(th["after"], int(255 * fa)), anchor="lt")
+                d.text((x + wp + gap, sy), minus, font=big,
+                       fill=fade_c(th["before"], int(255 * fa)), anchor="lt")
+                if foot.get("note"):
+                    d.text((W / 2, sy + self.W * 0.070), foot["note"],
+                           font=small,
+                           fill=fade_c(th["muted"], int(210 * fa)), anchor="mt")
         d.text((W / 2, H - 64), self.title, font=self.f_meta,
                fill=fade_c(th["muted"], int(150 * fade)), anchor="mm")
         return cv
@@ -699,9 +822,11 @@ class Renderer:
             lay.alpha_composite(nov)
             lay = lay.convert("RGB")
 
+        lay = self.vignetted(lay, p)
+        lay = self.vignetted(lay, max(0.0, (p - 0.55) / 0.45))
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
-        if p < 0.9:
+        if p < 0.9 and not self.vignette:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
                         outline=th["panel_border"], width=2)
 
@@ -734,7 +859,10 @@ class Renderer:
 
         # caption bar
         d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
-        accent = self.accent_intro if p < 0.5 else th["after"]
+        # the rule under the frame is the beat's colour, like everything else
+        # the beat owns; a clip whose halves are two colours cannot have one
+        accent = (self.accent_intro if p < 0.5 else
+                  self.th[self.ann[nxt if pan >= 0.5 else ai].get("tone", "after")])
         d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade_c(accent, 200))
 
         head, sub, ca = self.cap_intro[0], self.cap_intro[1], 255
@@ -759,7 +887,12 @@ class Renderer:
                     ca = int(255 * ((rel - 0.45) / 0.55))
                     head, sub = self.cap_outro
 
-        d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 84], fill=fade_c(accent, ca))
+        # No tick without words beside it. A clip that says its piece in the
+        # frame leaves this bar empty, and an accent mark alone in an empty bar
+        # is a label for nothing.
+        if head or sub:
+            d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 84],
+                        fill=fade_c(accent, ca))
         d.text((60, self.cap_y + 50), head, font=self.f_cap,
                fill=fade_c(th["fg"], ca), anchor="lm")
         d.text((60, self.cap_y + 92), sub, font=self.f_sub,
