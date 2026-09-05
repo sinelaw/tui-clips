@@ -179,6 +179,10 @@ fills them with cool metal and runs one specular highlight across, built once
 as a horizontal profile and sheared rather than evaluated per pixel. A line
 with no effect is set smaller, in the muted colour, for the word between.
 
+Every line arrives at its `at`, and setting them all to 0 puts the whole card
+up at once -- which is usually what a card wants, the effects being the thing
+that moves. The `shine` sweep runs on the card's own clock either way.
+
 A `footer` puts a diffstat under them -- `added` and `removed`, in the theme's
 `after` and `before`, which are the colours a diff uses anyway -- with an
 optional `note` beneath. It is the one line of a card that is a measurement
@@ -211,8 +215,16 @@ on the note's own axis and pushes the rect off-centre by half of it; it does
 leader's landing point and has the frame's width to sit in. Words that would
 run off the edge are pulled back in and the leader stretches to meet them.
 
+A note may open with an emoji, and colour ones are drawn from Noto rather than
+set as text: they are bitmaps, cut at exactly one size, so they are rendered at
+109 and scaled. Install `noto-fonts-emoji` (or equivalent) and they appear; do
+not and the words still do.
+
 A beat with a note usually wants `head` alone in the bar -- which file, which
-screen -- and no `sub` at all. Both are optional now.
+screen -- and no `sub` at all. Both are optional now, and when *no* beat has
+either, the bar is not drawn: the viewport takes its height, and the intro and
+outro captions float over the ground the vignette has already darkened. A strip
+of empty chrome across the bottom of every frame is worse than no strip.
 
 `render.note_size` is the text size in pixels, 30 by default. Two words at 54
 carry across a phone; a sentence at 30 does not. The room the fit reserves
