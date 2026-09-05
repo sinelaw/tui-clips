@@ -754,7 +754,6 @@ class Renderer:
                                    / 0.16))) * fade
             if fa > 0.004:
                 big = ImageFont.truetype(BOLD, int(self.W * 0.044))
-                small = ImageFont.truetype(BOLD, int(self.W * 0.026))
                 plus = f"+{int(foot['added']):,}"
                 minus = f"-{int(foot['removed']):,}"
                 gap = int(self.W * 0.030)
@@ -766,9 +765,12 @@ class Renderer:
                 d.text((x + wp + gap, sy), minus, font=big,
                        fill=fade_c(th["before"], int(255 * fa)), anchor="lt")
                 if foot.get("note"):
-                    d.text((W / 2, sy + self.W * 0.070), foot["note"],
-                           font=small,
-                           fill=fade_c(th["muted"], int(210 * fa)), anchor="mt")
+                    # the same size as the count above it: it names what the
+                    # count is a count of, and a caption half the size reads
+                    # as a footnote to the number rather than its subject
+                    d.text((W / 2, sy + self.W * 0.058), foot["note"],
+                           font=big,
+                           fill=fade_c(th["muted"], int(225 * fa)), anchor="mt")
         d.text((W / 2, H - 64), self.title, font=self.f_meta,
                fill=fade_c(th["muted"], int(150 * fade)), anchor="mm")
         return cv
