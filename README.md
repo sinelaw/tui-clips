@@ -98,7 +98,7 @@ the dimmed bands, the captions, the outro — is identical.
     "intro_caption": ["Same file, same width", "only the rendering changed"],
     "outro_caption": ["app", "github.com/you/app"],
     "timing": {"intro": 2.1, "zoom": 0.8,
-               "hold": 1.8, "pan": 0.4, "outro": 1.0},
+               "hold": 1.8, "pan": 0.4, "push": 0.9, "outro": 1.0},
     "theme": {"after": [74, 222, 128]},   // any of bg, caption_bg, panel_border,
                                           // muted, fg, before, after
     "annotations": [                  // one beat each
@@ -112,15 +112,23 @@ the dimmed bands, the captions, the outro — is identical.
       {"shots": ["rest", "s1", "s2"], // a run of screens, stepped across the hold
        "band": false,                 // no dimming, no frame: the screen alone
        "rows": [19, 42],              // still steers the camera
-       "head": "It follows", "sub": "the movement is the point"}
+       "head": "It follows", "sub": "the movement is the point"},
+      {"rows": [8, 13], "camera": "fit",
+       "note": "a few words",          // in the frame, beside the rect
+       "note_at": "below-right",       // above|below x left|right
+       "label": "BEFORE",              // this beat's banner ...
+       "tone": "before",               // ... and its colour, a theme key
+       "transition": "push",           // shove the last screen out, don't fade
+       "head": "where you are"}        // `sub` is optional
     ]
   },
   "encode": {"crf": 18, "preset": "slow"}
 }
 ```
 
-Duration is `intro + zoom + sum(hold) + (n-1)*pan + outro`; three annotations at
-the defaults gives 10.1s. Set any timing to `0` to drop that beat, or give one
+Duration is `intro + zoom + sum(hold) + the travel between beats + outro`,
+where the travel is `pan`, or `push` for a beat that asks for one; three
+annotations at the defaults gives 10.1s. Set any timing to `0` to drop that beat, or give one
 beat its own `hold` when it has more to show than the others.
 
 ## Framing a beat
@@ -133,6 +141,41 @@ Nothing clamps it back inside the capture: the ground beyond the edge paints as
 background, and that emptiness is what says *this is a detail of a bigger
 screen*. A tall, narrow rect in a wide frame will leave a lot of it, since the
 scale that fits its height is nowhere near the scale that fills the width.
+
+## Notes: saying it beside the thing
+
+A caption bar has room for a sentence, and a sentence is the wrong length for
+pointing at one expression. `"note"` puts a few words in the frame instead:
+dealt off the rect's corner so they cover nothing, on a plate so they do not
+read as one more line of the program, with a rule down their outer side and a
+square-cornered leader back to the rect. The corners are what make it a
+pointer -- a straight line to the same place looks like an underline.
+
+`"note_at"` picks the corner (`below-right` by default). The fit reserves room
+on the note's own axis and pushes the rect off-centre by half of it; it does
+*not* reserve room beside the rect, because the note is dealt sideways off the
+leader's landing point and has the frame's width to sit in. Words that would
+run off the edge are pulled back in and the leader stretches to meet them.
+
+A beat with a note usually wants `head` alone in the bar -- which file, which
+screen -- and no `sub` at all. Both are optional now.
+
+## Before and after in one clip
+
+Two things, and the second replaced the first: `"transition": "push"` on a beat
+sends the outgoing screen off to the left and brings the incoming one in behind
+it, instead of dissolving. Each keeps its own camera through the move, since a
+screen caught mid-scale while it is also travelling reads as a stumble -- and
+the point of the shape is that one thing *replaced* another, not that one
+became it. It takes `timing.push`, which wants longer than a `pan`.
+
+`"label"` and `"tone"` then name each half. A solo clip paints one banner for
+the whole run, which is wrong over a before/after; a beat naming its own takes
+the header for as long as it is on screen, and the swap rides the travel so it
+lands with the screen it describes. `tone` is a theme key (`before`, `after`,
+...) and colours the band, the note's rule and the banner together. The
+establishing shot takes the first beat's, so a clip that opens on a BEFORE does
+not open in the after's green.
 
 ## Shots: more than one screen in one clip
 
