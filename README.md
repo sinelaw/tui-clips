@@ -95,10 +95,15 @@ the dimmed bands, the captions, the outro — is identical.
     "rows": 50, "cols": 64,           // must match capture geometry
     "title": "app - feature",
     "labels": {"before": "BEFORE", "after": "AFTER", "solo": "NEW"},
+    "note_size": 54,                          // the callout text, in px
+    "title_card": {                           // a card before the clip
+      "lines": [{"text": "Horrible Code", "effect": "sick", "at": 0.04},
+                {"text": "to", "small": true, "at": 0.34},
+                {"text": "Declarative", "effect": "shine", "at": 0.50}]},
     "views": {"old": {"rows": [2, 24], "cols": [0, 62]}},   // camera rects
     "intro_caption": ["Same file, same width", "only the rendering changed"],
     "outro_caption": ["app", "github.com/you/app"],
-    "timing": {"intro": 2.1, "zoom": 0.8,
+    "timing": {"title": 0, "intro": 2.1, "zoom": 0.8,
                "hold": 1.8, "pan": 0.4, "push": 0.9, "outro": 1.0},
     "theme": {"after": [74, 222, 128]},   // any of bg, caption_bg, panel_border,
                                           // muted, fg, before, after
@@ -158,6 +163,20 @@ drawn below its rect, and the fit only leaves `FIT_PAD` outside the view. A
 note with nowhere to go flips to the other side of its rect rather than run off
 the frame, but slack is the better answer.
 
+## A card before the clip
+
+`render.title_card` puts one up: a few lines, each with a `text`, an `at`
+(when in the card it arrives, 0..1) and an optional `effect`. `timing.title`
+is how long it holds, and defaults to 2.6s once a card exists.
+
+Two effects, and they are meant as a pair — a before and an after said in
+colour before either is said in code. `sick` fills the glyphs with a vertical
+ramp between two greens that crawls and will not settle, and jitters the whole
+line a couple of pixels: the colour of code nobody wants to touch. `shine`
+fills them with cool metal and runs one specular highlight across, built once
+as a horizontal profile and sheared rather than evaluated per pixel. A line
+with no effect is set smaller, in the muted colour, for the word between.
+
 ## Notes: saying it beside the thing
 
 A caption bar has room for a sentence, and a sentence is the wrong length for
@@ -175,6 +194,11 @@ run off the edge are pulled back in and the leader stretches to meet them.
 
 A beat with a note usually wants `head` alone in the bar -- which file, which
 screen -- and no `sub` at all. Both are optional now.
+
+`render.note_size` is the text size in pixels, 30 by default. Two words at 54
+carry across a phone; a sentence at 30 does not. The room the fit reserves
+follows the font rather than being a constant, which it was until the font
+became a knob and the constant was quietly a second, disagreeing one.
 
 ## Before and after in one clip
 
