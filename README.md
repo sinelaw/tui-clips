@@ -185,7 +185,9 @@ that moves. The `shine` sweep runs on the card's own clock either way.
 
 A `footer` puts a diffstat under them -- `added` and `removed`, in the theme's
 `after` and `before`, which are the colours a diff uses anyway -- with an
-optional `note` beneath. It is the one line of a card that is a measurement
+optional `note` beneath, set at the same size: the note names what the count
+is a count of, and a caption half the size reads as a footnote to the number
+rather than as its subject. It is the one line of a card that is a measurement
 rather than a claim, which is what makes the claim above it land.
 
 ## The edges of a capture
