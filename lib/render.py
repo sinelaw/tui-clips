@@ -41,9 +41,19 @@ DEFAULT_THEME = {
     "before": [255, 107, 94],
     "after": [74, 222, 128],
 }
-DEFAULT_TIMING = {"intro": 2.1, "zoom": 0.8, "hold": 1.8, "pan": 0.4, "outro": 1.0}
+DEFAULT_TIMING = {"intro": 2.1, "zoom": 0.8, "hold": 1.8, "pan": 0.4,
+                  "push": 0.9, "outro": 1.0}
 DEFAULT_LABELS = {"before": "BEFORE", "after": "AFTER", "solo": "NEW",
                   "explode": "ANATOMY"}
+
+
+def cap_of(a: dict):
+    """a beat's caption-bar lines.
+
+    Both are optional now: a beat that says its piece with a `note` in the
+    frame wants the bar for where it is, or for nothing at all.
+    """
+    return a.get("head", ""), a.get("sub", "")
 
 
 def ease(t: float) -> float:
@@ -167,7 +177,11 @@ class Renderer:
         self.title = r.get("title", "")
         # the label that rides into the header once zoomed in
         self.lead = self.labels["after"] if self.mode == "compare" else self.labels["solo"]
-        self.accent_intro = self.th["before"] if self.mode == "compare" else self.th["after"]
+        # The establishing shot is the first beat's screen, so it takes that
+        # beat's colour: a clip whose first half is a BEFORE opens on it, and
+        # opening it in the after's green says the wrong thing for two seconds.
+        self.accent_intro = (self.th["before"] if self.mode == "compare"
+                             else self.th[self.ann[0].get("tone", "after")])
 
         # intro panel geometry, derived so it always fits the canvas
         label_h, gutter, margin = 44, 24, 16
@@ -191,6 +205,7 @@ class Renderer:
         self.f_hdr = ImageFont.truetype(BOLD, 38)
         self.f_cap = ImageFont.truetype(BOLD, 40)
         self.f_sub = ImageFont.truetype(MONO, 23)
+        self.f_note = ImageFont.truetype(BOLD, 30)
 
         self._cache: dict = {}
 
@@ -199,11 +214,33 @@ class Renderer:
         """beat i's dwell -- its own `hold`, else the clip's"""
         return float(self.ann[i].get("hold", self.t["hold"]))
 
+    def gap(self, i: int) -> float:
+        """the travel out of beat i.
+
+        A push moves a whole screen the width of the frame, which wants longer
+        than the cross-fade a pan is, so it takes its own timing.
+        """
+        if i + 1 < len(self.ann) and self.ann[i + 1].get("transition") == "push":
+            return float(self.t["push"])
+        return float(self.t["pan"])
+
     def total(self) -> float:
         n = len(self.ann)
         return (self.t["intro"] + self.t["zoom"]
                 + sum(self.hold(i) for i in range(n))
-                + self.t["pan"] * max(0, n - 1) + self.t["outro"])
+                + sum(self.gap(i) for i in range(n - 1)) + self.t["outro"])
+
+    def banner(self, i: int, j: int, pan: float):
+        """the word over the frame at this moment, and its colour.
+
+        One clip can be about two things -- a before and an after -- and then
+        a single banner for the whole run is wrong over one half of it. A beat
+        naming its own `label` (and a `tone`, which is a theme key) takes the
+        header for as long as it is on screen; the swap rides the travel, so
+        it lands with the screen it describes.
+        """
+        a = self.ann[j if pan >= 0.5 else i]
+        return a.get("label", self.lead), self.th[a.get("tone", "after")]
 
     def rect(self, i: int):
         """annotation i's rect in source pixels -- (x0, y0, x1, y1)"""
@@ -227,6 +264,12 @@ class Renderer:
     # beat is made of.
     FIT_PAD = 56
 
+    # A note is drawn outside the rect, so a beat that has one has to be
+    # framed with somewhere to put it: reserve a band on the note's side and
+    # push the rect off-centre by half of it, rather than padding both edges
+    # and shrinking the code to buy room it does not need above.
+    NOTE_ROOM = 220
+
     def cam(self, i: int):
         """beat i's camera -- (scale, source-x centred, source-y centred).
 
@@ -240,11 +283,24 @@ class Renderer:
         """
         if self.ann[i].get("camera") != "fit":
             return self.s_c, self.IW / 2, self.ann_cy(i)
+        a = self.ann[i]
         x0, y0, x1, y1 = self.rect(i)
         pad = 2 * self.FIT_PAD
+        note = bool(a.get("note"))
+        room = self.NOTE_ROOM if note else 0
+        # Only the note's own axis is reserved. It is dealt sideways off the
+        # leader's landing point, not off the rect, so the width it needs is
+        # the frame's -- and buying it a margin beside the rect as well only
+        # shrinks the code to pay for room the note never stands in.
         s = min((self.vp[2] - pad) / max(1.0, x1 - x0),
-                (self.vp[3] - pad) / max(1.0, y1 - y0))
-        return s, (x0 + x1) / 2, (y0 + y1) / 2
+                (self.vp[3] - pad - room) / max(1.0, y1 - y0))
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if note:
+            # centring a point below the rect lifts the rect up the frame,
+            # which is where it has to sit for a note drawn beneath it
+            above = str(a.get("note_at", "below-right")).startswith("above")
+            cy += (-1 if above else 1) * (room / 2) / s
+        return s, cx, cy
 
     # Of each shot's slot in a run, the share spent dissolving into the next.
     # Zero by default: a dissolve between two screens that differ by more than
@@ -288,6 +344,65 @@ class Renderer:
         return (px + x0 * s - 6, py + y0 * s - 6,
                 px + x1 * s + 6, py + y1 * s + 6)
 
+    # A callout's parts, in pixels: the clearance between the rect and the
+    # text, how far along the rect the text is dealt so the leader has a
+    # corner to turn, and the side border's thickness.
+    NOTE_GAP, NOTE_SIDE, NOTE_RULE = 70, 190, 6
+    NOTE_PAD = 18
+
+    def callout(self, ld, i: int, b, alpha: int, tone, size):
+        """beat i's note, drawn beside its rect.
+
+        A caption bar has room for a sentence, and a sentence is the wrong
+        length for pointing at one expression. So the note goes in the frame:
+        a few words, offset off the rect's corner so they cover nothing, with
+        a rule down their outer side and a square-cornered leader from that
+        rule back to the rect. The corners are what make it read as a pointer
+        rather than as more text -- a straight line to the same place looks
+        like an underline, and a curve looks like decoration.
+        """
+        a = self.ann[i]
+        note = a.get("note")
+        if not note or alpha <= 4:
+            return
+        at = str(a.get("note_at", "below-right"))
+        below, right = not at.startswith("above"), not at.endswith("left")
+        x0, y0, x1, y1 = b
+        cw, ch = size
+
+        # where the leader lands on the rect: in from the corner nearest the
+        # note, so the last segment runs alongside the rows it points at
+        px = min(x1 - 10, max(x0 + 10, x1 - 48 if right else x0 + 48))
+        py = y1 if below else y0
+
+        pd = self.NOTE_PAD
+        tw = ld.textlength(note, font=self.f_note)
+        asc, desc = self.f_note.getmetrics()
+        th_ = asc + desc
+        rx = px + (self.NOTE_SIDE if right else -self.NOTE_SIDE)
+        tx = rx + 20 if right else rx - 20 - tw
+        # keep the words on the canvas; the leader stretches instead
+        tx = min(cw - 40 - pd - tw, max(40.0 + pd, tx))
+        rx = tx - 20 if right else tx + tw + 20
+        ty0 = (y1 + self.NOTE_GAP) if below else (y0 - self.NOTE_GAP - th_)
+        ty1 = ty0 + th_
+
+        col = (*tone, alpha)
+        # A plate under the words. They sit over dimmed code, and dimmed code
+        # is still code: without a ground of its own the note reads as one
+        # more line of the program rather than as something said about it.
+        ld.rounded_rectangle(
+            [min(tx, rx) - pd, ty0 - pd, max(tx + tw, rx) + pd, ty1 + pd],
+            radius=8, fill=(*self.th["caption_bg"], min(alpha, 242)))
+        ld.rectangle([rx - self.NOTE_RULE / 2, ty0 - pd,
+                      rx + self.NOTE_RULE / 2, ty1 + pd], fill=col)
+        # the leader: out of the rule's near end, along, and back to the rect
+        near = ty0 - pd if below else ty1 + pd
+        mid = (near + py) / 2
+        ld.line([(rx, near), (rx, mid), (px, mid), (px, py)], fill=col, width=4)
+        ld.rectangle([px - 6, py - 6, px + 6, py + 6], fill=col)
+        ld.text((tx, ty0), note, font=self.f_note, fill=(*self.th["fg"], alpha))
+
     def scaled(self, img, s: float, tag: str):
         key = (tag, round(s, 4))
         if key not in self._cache:
@@ -323,10 +438,11 @@ class Renderer:
         last = len(self.ann) - 1
         for i in range(len(self.ann)):
             hold = self.hold(i)
-            seg = hold + (T["pan"] if i < last else 0)
+            travel = self.gap(i) if i < last else 0.0
+            seg = hold + travel
             if u < seg:
-                pan = (0.0 if u < hold or T["pan"] <= 0
-                       else ease((u - hold) / T["pan"]))
+                pan = (0.0 if u < hold or travel <= 0
+                       else ease((u - hold) / travel))
                 hp = min(1.0, u / hold) if hold > 0 else 1.0
                 return 1.0, i, pan, 0.0, hp
             u -= seg
@@ -369,17 +485,33 @@ class Renderer:
         lay = Image.new("RGB", (cwi, chi), th["bg"])
         px = int(round(cwi / 2 - src_cx * s))
         py = int(round(chi / 2 - src_cy * s))
-        base = self.screen(ai, 1.0 if pan > 0 else hp, s)
-        if pan > 0:
-            nb = self.screen(nxt, 0.0, s)
-            if nb is not base:
-                base = Image.blend(base, nb, pan)
-        lay.paste(base, (px, py))
+        # A push replaces the screen instead of dissolving into it: the old
+        # one leaves to the left and the new arrives behind it. Each keeps its
+        # own camera through the move -- a screen caught mid-scale while it is
+        # also travelling reads as a stumble, and the point of the shape is
+        # that one thing *replaced* another, not that one became it.
+        push = pan > 0 and self.ann[nxt].get("transition") == "push"
+        if push:
+            for k, hpk, off in ((ai, 1.0, -pan * cwi), (nxt, 0.0, (1 - pan) * cwi)):
+                sk, sxk, syk = self.cam(k)
+                lay.paste(self.screen(k, hpk, sk),
+                          (int(round(cwi / 2 - sxk * sk + off)),
+                           int(round(chi / 2 - syk * sk))))
+        else:
+            base = self.screen(ai, 1.0 if pan > 0 else hp, s)
+            if pan > 0:
+                nb = self.screen(nxt, 0.0, s)
+                if nb is not base:
+                    base = Image.blend(base, nb, pan)
+            lay.paste(base, (px, py))
 
         # A beat with `band: false` is the screen alone -- nothing dimmed and
         # no frame drawn -- for a run of shots whose own movement is the point.
         lit = lerp(0.0 if self.ann[ai].get("band") is False else 1.0,
                    0.0 if self.ann[nxt].get("band") is False else 1.0, pan)
+        if push:
+            # nothing is drawn over a screen that is on its way out
+            lit = 0.0
         dim = int(150 * min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel) * lit)
         if dim > 3:
             b = self.band(ai, px, py, s)
@@ -392,9 +524,27 @@ class Renderer:
             lay.alpha_composite(ov)
             lay = lay.convert("RGB")
             ld = ImageDraw.Draw(lay)
-            g = fade(th["after"], int(255 * (1.0 - rel) * lit))
+            tone_i = self.th[self.ann[ai].get("tone", "after")]
+            tone_j = self.th[self.ann[nxt].get("tone", "after")]
+            g = fade(tuple(int(lerp(tone_i[k], tone_j[k], pan)) for k in range(3)),
+                     int(255 * (1.0 - rel) * lit))
             ld.rounded_rectangle(list(b), radius=10, outline=g, width=3)
             ld.rectangle([b[0] - 12, b[1], b[0] - 7, b[3]], fill=g)
+
+            # Notes go on their own RGBA pass: a plate that fades has to be
+            # composited, not drawn, and the outgoing note has to cross the
+            # incoming one rather than overwrite it.
+            nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
+            nd = ImageDraw.Draw(nov)
+            fade_out = int(255 * (1.0 - rel) * lit * (1.0 - pan))
+            self.callout(nd, ai, b, fade_out, tone_i, lay.size)
+            if pan > 0:
+                self.callout(nd, nxt, self.band(nxt, px, py, s),
+                             int(255 * (1.0 - rel) * lit * pan), tone_j,
+                             lay.size)
+            lay = lay.convert("RGBA")
+            lay.alpha_composite(nov)
+            lay = lay.convert("RGB")
 
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
@@ -413,13 +563,16 @@ class Renderer:
             if self.B is not None:
                 d.text((self.bx + self.panel_w / 2, 108), self.labels["before"],
                        font=self.f_label, fill=fade(th["before"], a_out), anchor="mm")
-            if self.lead:
-                d.text((self.ax + self.panel_w / 2, 108), self.lead,
-                       font=self.f_label, fill=fade(th["after"], a_out), anchor="mm")
+            intro_lead = self.ann[0].get("label", self.lead)
+            if intro_lead:
+                d.text((self.ax + self.panel_w / 2, 108), intro_lead,
+                       font=self.f_label, fill=fade(self.accent_intro, a_out),
+                       anchor="mm")
         if a_in > 4:
-            if self.lead:
-                d.text((32, 50), self.lead, font=self.f_hdr,
-                       fill=fade(th["after"], a_in), anchor="lm")
+            lead, tone = self.banner(ai, nxt, pan)
+            if lead:
+                d.text((32, 50), lead, font=self.f_hdr,
+                       fill=fade(tone, a_in), anchor="lm")
                 d.text((W - 32, 52), self.title, font=self.f_meta,
                        fill=fade(th["muted"], a_in), anchor="rm")
             else:
@@ -437,15 +590,15 @@ class Renderer:
                 ca = int(255 * (1 - p / 0.5))
             else:
                 ca = int(255 * ((p - 0.5) / 0.5))
-                head, sub = self.ann[0]["head"], self.ann[0]["sub"]
+                head, sub = cap_of(self.ann[0])
         elif p >= 1.0:
-            head, sub = self.ann[ai]["head"], self.ann[ai]["sub"]
+            head, sub = cap_of(self.ann[ai])
             if pan > 0:
                 if pan < 0.5:
                     ca = int(255 * (1 - pan / 0.5))
                 else:
                     ca = int(255 * ((pan - 0.5) / 0.5))
-                    head, sub = self.ann[nxt]["head"], self.ann[nxt]["sub"]
+                    head, sub = cap_of(self.ann[nxt])
             if rel > 0:
                 if rel < 0.45:
                     ca = int(255 * (1 - rel / 0.45))
