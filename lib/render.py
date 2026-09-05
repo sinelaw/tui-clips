@@ -26,11 +26,18 @@ font or geometry change.
 """
 from __future__ import annotations
 
+import glob
 import math
 import os
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 BOLD = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
+# Colour emoji are bitmaps, and Noto's are cut at exactly one size: asking
+# FreeType for any other raises. So they are drawn at 109 and scaled, which is
+# also why they cannot simply be a second font in a text run.
+EMOJI = next(iter(sorted(glob.glob(
+    "/usr/share/fonts/**/NotoColorEmoji*.ttf", recursive=True))), None)
+EMOJI_PX = 109
 MONO = "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"
 
 DEFAULT_THEME = {
@@ -149,7 +156,14 @@ class Renderer:
         self.fps = int(r.get("fps", 60))
         self.header_h = int(r.get("header_height", 100))
         self.cap_h = int(r.get("caption_height", 130))
-        self.cap_y = self.H - self.cap_h
+        # The bar exists for the beats. A clip whose beats all say their piece
+        # in the frame has nothing to put in it, and a strip of empty chrome
+        # across the bottom is worse than no strip: the intro and outro
+        # captions float over the ground instead, which the vignette has
+        # already darkened for them.
+        self.bar = any(a.get("head") or a.get("sub")
+                       for a in r.get("annotations", []))
+        self.cap_y = self.H - (self.cap_h if self.bar else 0)
         self.vp = (0, self.header_h, self.W, self.cap_y - self.header_h)
 
         th = dict(DEFAULT_THEME)
@@ -392,7 +406,36 @@ class Renderer:
     NOTE_GAP, NOTE_SIDE, NOTE_RULE = 70, 190, 6
     NOTE_PAD = 18
 
-    def callout(self, ld, i: int, b, alpha: int, tone, size):
+    def emoji(self, ch: str, h: int):
+        """`ch` as an image `h` pixels tall, or None if it is not one"""
+        if not EMOJI or not ch:
+            return None
+        key = ("emoji", ch, h)
+        if key not in self._cache:
+            f = ImageFont.truetype(EMOJI, EMOJI_PX)
+            im = Image.new("RGBA", (EMOJI_PX * 2, int(EMOJI_PX * 1.6)),
+                           (0, 0, 0, 0))
+            ImageDraw.Draw(im).text((4, 4), ch, font=f, embedded_color=True)
+            box = im.getbbox()
+            if not box:
+                return None
+            im = im.crop(box)
+            w = max(1, round(im.width * h / max(1, im.height)))
+            if len(self._cache) > 24:
+                self._cache.clear()
+            self._cache[key] = im.resize((w, h), Image.LANCZOS)
+        return self._cache[key]
+
+    @staticmethod
+    def split_note(note: str):
+        """-> (emoji, words). A note may open with one; most do."""
+        head, _, rest = note.partition(" ")
+        if head and rest and not head.isascii():
+            return head, rest
+        return None, note
+
+    def callout(self, nov, i: int, b, alpha: int, tone, size):
+        ld = ImageDraw.Draw(nov)
         """beat i's note, drawn beside its rect.
 
         A caption bar has room for a sentence, and a sentence is the wrong
@@ -417,9 +460,13 @@ class Renderer:
         px = min(x1 - 10, max(x0 + 10, x1 - 48 if right else x0 + 48))
 
         pd = self.NOTE_PAD
-        tw = ld.textlength(note, font=self.f_note)
+        emo_ch, note = self.split_note(note)
         asc, desc = self.f_note.getmetrics()
         th_ = asc + desc
+        emo = self.emoji(emo_ch, int(asc * 0.92))
+        tw = ld.textlength(note, font=self.f_note)
+        emo_w = (emo.width + int(pd * 0.8)) if emo else 0
+        tw += emo_w
         rx = px + (self.NOTE_SIDE if right else -self.NOTE_SIDE)
         tx = rx + 20 if right else rx - 20 - tw
         # keep the words on the canvas; the leader stretches instead
@@ -454,7 +501,12 @@ class Renderer:
         mid = (near + py) / 2
         ld.line([(rx, near), (rx, mid), (px, mid), (px, py)], fill=col, width=4)
         ld.rectangle([px - 6, py - 6, px + 6, py + 6], fill=col)
-        ld.text((tx, ty0), note, font=self.f_note, fill=(*self.th["fg"], alpha))
+        if emo:
+            e = emo.copy()
+            e.putalpha(e.getchannel("A").point(lambda v: int(v * alpha / 255)))
+            nov.alpha_composite(e, (int(tx), int(ty0 + (asc - e.height) / 2)))
+        ld.text((tx + emo_w, ty0), note, font=self.f_note,
+                fill=(*self.th["fg"], alpha))
 
     # How far in from each edge the picture gives up, as a fraction of that
     # side. Taller on the top and bottom because that is where a terminal
@@ -659,7 +711,7 @@ class Renderer:
             if i:
                 y += 26
             at = float(ln.get("at", 0.0))
-            a = ease(max(0.0, min(1.0, (u - at) / 0.14))) * fade
+            a = ease(max(0.0, min(1.0, (u - at) / 0.07))) * fade
             if a > 0.004:
                 x = (W - m.width) / 2
                 eff = ln.get("effect")
@@ -670,7 +722,7 @@ class Renderer:
                     col = self._sick(m.size, t)
                     glow, gcol, ga = 15, (86, 150, 26), 0.55
                 elif eff == "shine":
-                    sweep = max(0.0, min(1.0, (u - at - 0.10) / 0.34))
+                    sweep = max(0.0, min(1.0, (u - 0.18) / 0.50))
                     col = self._shine(m.size, t, sweep)
                     glow, gcol, ga = 19, (150, 235, 190), 0.42
                 else:
@@ -811,11 +863,10 @@ class Renderer:
             # composited, not drawn, and the outgoing note has to cross the
             # incoming one rather than overwrite it.
             nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-            nd = ImageDraw.Draw(nov)
             fade_out = int(255 * (1.0 - rel) * lit * (1.0 - pan))
-            self.callout(nd, ai, b, fade_out, tone_i, lay.size)
+            self.callout(nov, ai, b, fade_out, tone_i, lay.size)
             if pan > 0:
-                self.callout(nd, nxt, self.band(nxt, px, py, s),
+                self.callout(nov, nxt, self.band(nxt, px, py, s),
                              int(255 * (1.0 - rel) * lit * pan), tone_j,
                              lay.size)
             lay = lay.convert("RGBA")
@@ -857,13 +908,17 @@ class Renderer:
                 d.text((32, 50), self.title, font=self.f_meta,
                        fill=fade_c(th["muted"], a_in), anchor="lm")
 
-        # caption bar
-        d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
+        # caption bar -- or, with no bar, the line it would have held
+        ty = self.cap_y if self.bar else H - self.cap_h
+        if self.bar:
+            d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
         # the rule under the frame is the beat's colour, like everything else
         # the beat owns; a clip whose halves are two colours cannot have one
         accent = (self.accent_intro if p < 0.5 else
                   self.th[self.ann[nxt if pan >= 0.5 else ai].get("tone", "after")])
-        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade_c(accent, 200))
+        if self.bar:
+            d.rectangle([0, self.cap_y, W, self.cap_y + 3],
+                        fill=fade_c(accent, 200))
 
         head, sub, ca = self.cap_intro[0], self.cap_intro[1], 255
         if 0.0 < p < 1.0:
@@ -891,11 +946,10 @@ class Renderer:
         # frame leaves this bar empty, and an accent mark alone in an empty bar
         # is a label for nothing.
         if head or sub:
-            d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 84],
-                        fill=fade_c(accent, ca))
-        d.text((60, self.cap_y + 50), head, font=self.f_cap,
+            d.rectangle([32, ty + 44, 40, ty + 84], fill=fade_c(accent, ca))
+        d.text((60, ty + 50), head, font=self.f_cap,
                fill=fade_c(th["fg"], ca), anchor="lm")
-        d.text((60, self.cap_y + 92), sub, font=self.f_sub,
+        d.text((60, ty + 92), sub, font=self.f_sub,
                fill=fade_c(th["muted"], ca), anchor="lm")
         return cv
 
@@ -1462,7 +1516,7 @@ class ExplodeRenderer:
                 ca = int(255 * ((v - 0.5) / 0.5))
         d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 86],
                     fill=fade_c(th["after"], ca))
-        d.text((60, self.cap_y + 50), head, font=self.f_cap,
+        d.text((60, ty + 50), head, font=self.f_cap,
                fill=fade_c(th["fg"], ca), anchor="lm")
         d.text((60, self.cap_y + 94), sub, font=self.f_sub,
                fill=fade_c(th["muted"], ca), anchor="lm")
