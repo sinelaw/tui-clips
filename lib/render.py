@@ -26,8 +26,9 @@ font or geometry change.
 """
 from __future__ import annotations
 
+import math
 import os
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 BOLD = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 MONO = "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"
@@ -41,8 +42,8 @@ DEFAULT_THEME = {
     "before": [255, 107, 94],
     "after": [74, 222, 128],
 }
-DEFAULT_TIMING = {"intro": 2.1, "zoom": 0.8, "hold": 1.8, "pan": 0.4,
-                  "push": 0.9, "outro": 1.0}
+DEFAULT_TIMING = {"title": 0.0, "intro": 2.1, "zoom": 0.8, "hold": 1.8,
+                  "pan": 0.4, "push": 0.9, "outro": 1.0}
 DEFAULT_LABELS = {"before": "BEFORE", "after": "AFTER", "solo": "NEW",
                   "explode": "ANATOMY"}
 
@@ -66,7 +67,7 @@ def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
-def fade(c, a: int):
+def fade_c(c, a: int):
     return tuple(int(v * a / 255) for v in c)
 
 
@@ -168,6 +169,12 @@ class Renderer:
         # every 1.5s asks the reader to re-find their place every 1.5s, and
         # the thing that moved was never the code.
         self.views = r.get("views", {})
+        # A card before the clip: a few lines, each with an effect of its own.
+        # It is the only place the renderer says anything in its own voice, so
+        # it is also the only place with an effect that is not a camera move.
+        self.card = r.get("title_card")
+        if self.card and not self.t.get("title"):
+            self.t["title"] = 2.6
         if not self.ann:
             raise SystemExit("render.annotations is empty; nothing to show")
         for a in self.ann:
@@ -214,7 +221,7 @@ class Renderer:
         self.f_hdr = ImageFont.truetype(BOLD, 38)
         self.f_cap = ImageFont.truetype(BOLD, 40)
         self.f_sub = ImageFont.truetype(MONO, 23)
-        self.f_note = ImageFont.truetype(BOLD, 30)
+        self.f_note = ImageFont.truetype(BOLD, int(r.get("note_size", 30)))
 
         self._cache: dict = {}
 
@@ -235,7 +242,7 @@ class Renderer:
 
     def total(self) -> float:
         n = len(self.ann)
-        return (self.t["intro"] + self.t["zoom"]
+        return (self.t["title"] + self.t["intro"] + self.t["zoom"]
                 + sum(self.hold(i) for i in range(n))
                 + sum(self.gap(i) for i in range(n - 1)) + self.t["outro"])
 
@@ -280,7 +287,15 @@ class Renderer:
     # framed with somewhere to put it: reserve a band on the note's side and
     # push the rect off-centre by half of it, rather than padding both edges
     # and shrinking the code to buy room it does not need above.
-    NOTE_ROOM = 220
+    def note_room(self) -> int:
+        """the band a note stands in, which is however tall the note is.
+
+        It was a constant until the text became a knob, at which point the
+        constant was quietly a second, disagreeing knob.
+        """
+        asc, desc = self.f_note.getmetrics()
+        return int(asc + desc + self.NOTE_GAP + 2 * self.NOTE_PAD + 70)
+
 
     def cam(self, i: int):
         """beat i's camera -- (scale, source-x centred, source-y centred).
@@ -308,7 +323,7 @@ class Renderer:
         x0, y0, x1, y1 = rect
         pad = 2 * self.FIT_PAD
         note = bool(a.get("note"))
-        room = self.NOTE_ROOM if note else 0
+        room = self.note_room() if note else 0
         # Only the note's own axis is reserved. It is dealt sideways off the
         # leader's landing point, not off the rect, so the width it needs is
         # the frame's -- and buying it a margin beside the rect as well only
@@ -481,9 +496,115 @@ class Renderer:
         return (1.0, last, 0.0,
                 ease(u / T["outro"]) if T["outro"] > 0 else 1.0, 1.0)
 
+    # -- title card ---------------------------------------------------------
+    def _glyphs(self, text, font):
+        """the line as a bare alpha mask, and its size"""
+        x0, y0, x1, y1 = font.getbbox(text)
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        m = Image.new("L", (w + 8, h + 8), 0)
+        ImageDraw.Draw(m).text((4 - x0, 4 - y0), text, font=font, fill=255)
+        return m
+
+    def _sick(self, size, t: float) -> Image.Image:
+        """bile. A vertical ramp between two greens that will not settle,
+        crawling upward -- the colour of code you do not want to touch."""
+        w, h = size
+        col = Image.new("RGB", (1, h))
+        px = col.load()
+        for y in range(h):
+            k = 0.5 + 0.5 * math.sin(y * 0.30 - t * 7.0)
+            k2 = 0.5 + 0.5 * math.sin(y * 0.11 + t * 3.1)
+            px[0, y] = (int(lerp(66, 132, k) * lerp(0.8, 1.0, k2)),
+                        int(lerp(96, 176, k)),
+                        int(lerp(20, 40, k)))
+        return col.resize((w, h), Image.BILINEAR)
+
+    def _shine(self, size, t: float, sweep: float) -> Image.Image:
+        """clean metal, with one highlight crossing it.
+
+        The band is built once as a horizontal profile and sheared, rather
+        than evaluated per pixel: it is the same band at every row, only
+        further along.
+        """
+        w, h = size
+        prof = Image.new("L", (w, 1), 0)
+        px = prof.load()
+        centre, sigma = sweep * (w * 1.6) - w * 0.3, w * 0.085
+        for x in range(w):
+            d = (x - centre) / sigma
+            px[x, 0] = int(255 * math.exp(-d * d)) if abs(d) < 4 else 0
+        band = prof.resize((w, h), Image.BILINEAR).transform(
+            (w, h), Image.AFFINE, (1, 0.45, 0, 0, 1, 0), Image.BILINEAR)
+        base = Image.new("RGB", (w, h), (150, 186, 176))
+        base.paste(Image.new("RGB", (w, h), (255, 255, 255)), (0, 0), band)
+        return base
+
+    def title_frame(self, u: float) -> Image.Image:
+        """the card at progress `u`, 0..1"""
+        th, W, H = self.th, self.W, self.H
+        cv = Image.new("RGB", (W, H), th["bg"])
+        lines = self.card["lines"]
+        t = u * self.t["title"]
+        fade = 1.0 - ease(max(0.0, (u - 0.90) / 0.10))
+
+        big = ImageFont.truetype(BOLD, int(self.W * 0.082))
+        small = ImageFont.truetype(BOLD, int(self.W * 0.036))
+        rendered, total_h = [], 0
+        for i, ln in enumerate(lines):
+            f = small if ln.get("small") or not ln.get("effect") else big
+            m = self._glyphs(ln["text"], f)
+            rendered.append((ln, m))
+            total_h += m.height + (26 if i else 0)
+
+        y = (H - total_h) / 2
+        for i, (ln, m) in enumerate(rendered):
+            if i:
+                y += 26
+            at = float(ln.get("at", 0.0))
+            a = ease(max(0.0, min(1.0, (u - at) / 0.14))) * fade
+            if a > 0.004:
+                x = (W - m.width) / 2
+                eff = ln.get("effect")
+                dx = dy = 0.0
+                if eff == "sick":
+                    # it will not hold still either
+                    dx, dy = math.sin(t * 21) * 2.6, math.cos(t * 15) * 2.0
+                    col = self._sick(m.size, t)
+                    glow, gcol, ga = 15, (86, 150, 26), 0.55
+                elif eff == "shine":
+                    sweep = max(0.0, min(1.0, (u - at - 0.10) / 0.34))
+                    col = self._shine(m.size, t, sweep)
+                    glow, gcol, ga = 19, (150, 235, 190), 0.42
+                else:
+                    col = Image.new("RGB", m.size, th["muted"])
+                    glow = 0
+                if glow:
+                    # on a canvas of its own, three radii bigger: a blur that
+                    # reaches the edge of its image has that edge for an
+                    # outline, and the outline is a rectangle
+                    q = glow * 3
+                    gm = Image.new("L", (m.width + 2 * q, m.height + 2 * q), 0)
+                    gm.paste(m, (q, q))
+                    g = gm.filter(ImageFilter.GaussianBlur(glow))
+                    g = g.point(lambda v: int(v * a * ga))
+                    cv.paste(Image.new("RGB", gm.size, gcol),
+                             (int(x + dx - q), int(y + dy - q)), g)
+                cv.paste(col, (int(x + dx), int(y + dy)),
+                         m.point(lambda v: int(v * a)))
+            y += m.height
+
+        d = ImageDraw.Draw(cv)
+        d.text((W / 2, H - 64), self.title, font=self.f_meta,
+               fill=fade_c(th["muted"], int(150 * fade)), anchor="mm")
+        return cv
+
     def frame(self, n: int) -> Image.Image:
         th, W, H = self.th, self.W, self.H
         t = n / self.fps
+        if self.t["title"] > 0:
+            if t < self.t["title"]:
+                return self.title_frame(t / self.t["title"])
+            t -= self.t["title"]
         p, ai, pan, rel, hp = self.phase(t)
         nxt = min(ai + 1, len(self.ann) - 1)
 
@@ -558,7 +679,7 @@ class Renderer:
             ld = ImageDraw.Draw(lay)
             tone_i = self.th[self.ann[ai].get("tone", "after")]
             tone_j = self.th[self.ann[nxt].get("tone", "after")]
-            g = fade(tuple(int(lerp(tone_i[k], tone_j[k], pan)) for k in range(3)),
+            g = fade_c(tuple(int(lerp(tone_i[k], tone_j[k], pan)) for k in range(3)),
                      int(255 * (1.0 - rel) * lit))
             ld.rounded_rectangle(list(b), radius=10, outline=g, width=3)
             ld.rectangle([b[0] - 12, b[1], b[0] - 7, b[3]], fill=g)
@@ -591,30 +712,30 @@ class Renderer:
         a_out = 255 - a_in
         if a_out > 4:
             d.text((W / 2, 40), self.title, font=self.f_meta,
-                   fill=fade(th["muted"], a_out), anchor="mm")
+                   fill=fade_c(th["muted"], a_out), anchor="mm")
             if self.B is not None:
                 d.text((self.bx + self.panel_w / 2, 108), self.labels["before"],
-                       font=self.f_label, fill=fade(th["before"], a_out), anchor="mm")
+                       font=self.f_label, fill=fade_c(th["before"], a_out), anchor="mm")
             intro_lead = self.ann[0].get("label", self.lead)
             if intro_lead:
                 d.text((self.ax + self.panel_w / 2, 108), intro_lead,
-                       font=self.f_label, fill=fade(self.accent_intro, a_out),
+                       font=self.f_label, fill=fade_c(self.accent_intro, a_out),
                        anchor="mm")
         if a_in > 4:
             lead, tone = self.banner(ai, nxt, pan)
             if lead:
                 d.text((32, 50), lead, font=self.f_hdr,
-                       fill=fade(tone, a_in), anchor="lm")
+                       fill=fade_c(tone, a_in), anchor="lm")
                 d.text((W - 32, 52), self.title, font=self.f_meta,
-                       fill=fade(th["muted"], a_in), anchor="rm")
+                       fill=fade_c(th["muted"], a_in), anchor="rm")
             else:
                 d.text((32, 50), self.title, font=self.f_meta,
-                       fill=fade(th["muted"], a_in), anchor="lm")
+                       fill=fade_c(th["muted"], a_in), anchor="lm")
 
         # caption bar
         d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
         accent = self.accent_intro if p < 0.5 else th["after"]
-        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade(accent, 200))
+        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade_c(accent, 200))
 
         head, sub, ca = self.cap_intro[0], self.cap_intro[1], 255
         if 0.0 < p < 1.0:
@@ -638,11 +759,11 @@ class Renderer:
                     ca = int(255 * ((rel - 0.45) / 0.55))
                     head, sub = self.cap_outro
 
-        d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 84], fill=fade(accent, ca))
+        d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 84], fill=fade_c(accent, ca))
         d.text((60, self.cap_y + 50), head, font=self.f_cap,
-               fill=fade(th["fg"], ca), anchor="lm")
+               fill=fade_c(th["fg"], ca), anchor="lm")
         d.text((60, self.cap_y + 92), sub, font=self.f_sub,
-               fill=fade(th["muted"], ca), anchor="lm")
+               fill=fade_c(th["muted"], ca), anchor="lm")
         return cv
 
 
@@ -1073,7 +1194,7 @@ class ExplodeRenderer:
                     for k in range(3))
         rad = max(2, min(10, min(w, h) // 3))
         d.rounded_rectangle([x, y, x + w - 1, y + h - 1], radius=rad,
-                            outline=fade(col, int(255 * alpha * (0.5 + 0.5 * lit))),
+                            outline=fade_c(col, int(255 * alpha * (0.5 + 0.5 * lit))),
                             width=2 if lit > 0.5 else 1)
 
     def _chips(self, cv, d, labels):
@@ -1188,7 +1309,7 @@ class ExplodeRenderer:
         # header and caption bars, painted over whatever ran under them
         d.rectangle([0, 0, W, self.header_h], fill=th["bg"])
         d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
-        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade(th["after"], 200))
+        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade_c(th["after"], 200))
         if self.lead:
             d.text((32, self.header_h / 2), self.lead, font=self.f_hdr,
                    fill=th["after"], anchor="lm")
@@ -1207,9 +1328,9 @@ class ExplodeRenderer:
             else:
                 ca = int(255 * ((v - 0.5) / 0.5))
         d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 86],
-                    fill=fade(th["after"], ca))
+                    fill=fade_c(th["after"], ca))
         d.text((60, self.cap_y + 50), head, font=self.f_cap,
-               fill=fade(th["fg"], ca), anchor="lm")
+               fill=fade_c(th["fg"], ca), anchor="lm")
         d.text((60, self.cap_y + 94), sub, font=self.f_sub,
-               fill=fade(th["muted"], ca), anchor="lm")
+               fill=fade_c(th["muted"], ca), anchor="lm")
         return cv
