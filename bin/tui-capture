@@ -8,6 +8,7 @@
 #   tui-capture --out shot.png --geometry 64x50 --font "JetBrains Mono 21" \
 #               --workdir /tmp/proj --settle 8 \
 #               --env XDG_DATA_HOME=/tmp/scratch/data \
+#               --unset 'CLAUDE_*' \
 #               --key ctrl+p --type "toggle compose" --key Return \
 #               -- /usr/bin/myeditor README.md
 #
@@ -38,6 +39,7 @@ SETTLE=8
 OUT=""
 ACTIONS=()
 ENVS=()
+UNSETS=()
 KEEP=0
 STOP=0
 
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --settle)   SETTLE="$2";      shift 2 ;;
     --out)      OUT="$2";         shift 2 ;;
     --env)      ENVS+=("$2");     shift 2 ;;
+    --unset)    UNSETS+=("$2");   shift 2 ;;
     --key)      ACTIONS+=("key:$2");   shift 2 ;;
     --shot)     ACTIONS+=("shot:$2");  shift 2 ;;
     --record)   ACTIONS+=("record:$2"); shift 2 ;;
@@ -88,6 +91,19 @@ for t in Xvfb xfce4-terminal xdotool import ffmpeg; do
 done
 
 export DISPLAY="$DISPLAY_NUM"
+# --unset takes a glob and drops every exported variable matching it. A capture
+# inherits the environment of whatever launched it, and some of that leaks into
+# the program being filmed: an agent started from inside another agent's session
+# reads the parent's variables and prints a warning about it, which then belongs
+# to the clip forever. Clearing them is not cosmetic -- the recording should
+# show what a user would see, not what this harness happened to export.
+for name in $(compgen -e); do
+  for u in "${UNSETS[@]:-}"; do
+    [[ -n "$u" ]] || continue
+    # shellcheck disable=SC2254  -- the pattern is meant to glob
+    case "$name" in $u) unset "$name" ;; esac
+  done
+done
 for e in "${ENVS[@]:-}"; do [[ -n "$e" ]] && export "${e?}"; done
 
 # Start Xvfb only if this display is not already answering.

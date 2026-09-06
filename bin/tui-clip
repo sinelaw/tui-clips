@@ -76,6 +76,8 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
             "--keep-display"]
     for k, v in {**cap.get("env", {}), **p.get("env", {})}.items():
         argv += ["--env", f"{k}={expand(v, ctx)}"]
+    for pat in [*cap.get("unset_env", []), *p.get("unset_env", [])]:
+        argv += ["--unset", pat]
     for step in [*cap.get("keys", []), *p.get("keys", [])]:
         if "key" in step:
             # {"key": "Down", "repeat": 12} -> one travel, not twelve jumps

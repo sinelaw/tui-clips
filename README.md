@@ -87,6 +87,22 @@ are opened as needed rather than held in memory — a few seconds at 30fps is
 several gigabytes decoded, and each frame is wanted for about two output frames
 and then never again.
 
+### A redirected `XDG_DATA_HOME` is not a sandbox
+
+Pointing `XDG_DATA_HOME` at the scratch directory isolates the program's own
+per-project state, which is usually what a clip wants — a run that starts from
+nothing, every time. It does not isolate anything else the program starts.
+
+A self-updating tool launched inside that redirect will install itself into the
+scratch directory and repoint whatever launcher lives in the user's `PATH` at
+it. The next run deletes the scratch tree, and the tool is broken on the real
+machine. Claude Code does exactly this: its binaries live under
+`$XDG_DATA_HOME/claude/versions`.
+
+So give such a program its real directory back when you launch it —
+`XDG_DATA_HOME="$HOME/.local/share" the-tool` — and do it off camera, before
+the `record`, so the prefix is not in the clip.
+
 ## Typing
 
 A beat may set its `sub` one character at a time, with a caret:

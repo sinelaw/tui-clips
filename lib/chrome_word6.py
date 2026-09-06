@@ -348,6 +348,7 @@ class Word6Chrome:
                ("pilcrow",)]
     TITLE_H = 18
     MENU_H = 18
+    EMBED_TITLE_H = 12
     MENU_GAP = 19
     BTN_H = 22
     BTN_GAP = 1
@@ -377,6 +378,11 @@ class Word6Chrome:
         self.body_size = int(cfg.get("body_size", 12))
         self.body_lead = int(cfg.get("body_lead", 14))
         self.handles = bool(cfg.get("handles", True))
+        # A capture dropped straight onto the page is just a rectangle of text;
+        # framed as a window with a caption, it is obviously a terminal. The
+        # title is inactive-grey rather than the caption's blue: two blue bars
+        # in one frame read as two documents, not as an application inside one.
+        self.embed_title = cfg.get("embed_title")
         self.art_opts = dict(cfg.get("wordart", {}))
 
         # What the renderer fills the growing intro panel with, so the capture
@@ -392,7 +398,13 @@ class Word6Chrome:
         else:
             top = (by0 + 6 + self.head_h + 4
                    + self.body_lines * self.body_lead + 6)
-        self._vp_logical = (bx0 + 14, top, bx1 - 14, by1)
+        # The window frame is drawn outside the viewport, so it eats into the
+        # document rather than into the capture.
+        # Kept tight: the decoration is there to say "this is a terminal", and
+        # every pixel it takes is one the editor inside it does not get.
+        self.embed_pad = (2, self.EMBED_TITLE_H + 3, 2) if self.embed_title else (0, 0, 0)
+        lpad, tpad, rpad = self.embed_pad
+        self._vp_logical = (bx0 + 14 + lpad, top + tpad, bx1 - 14 - rpad, by1)
         self._draw_embed_frame()
 
     # -- what the renderer needs
@@ -526,22 +538,41 @@ class Word6Chrome:
         return im, doc
 
     def _draw_embed_frame(self):
-        """Hairline border and selection handles around where the capture goes.
+        """The window the capture sits in, and its selection handles.
 
-        Baked into the static window so they upscale chunky like the rest of the
-        chrome, and so the capture paints inside them rather than over them.
+        Baked into the static window so it upscales chunky like the rest of the
+        chrome, and so the capture paints inside it rather than over it.
         """
         d = ImageDraw.Draw(self.base)
         x0, y0, x1, y1 = self._vp_logical
-        d.line([(x0 - 1, y0 - 1), (x1, y0 - 1)], fill=BLACK)
-        d.line([(x0 - 1, y0 - 1), (x0 - 1, y1)], fill=BLACK)
-        d.line([(x1, y0 - 1), (x1, y1)], fill=BLACK)
+        lpad, tpad, rpad = self.embed_pad
+        if self.embed_title:
+            # A raised window: face frame, an inactive caption with its own
+            # control box, and the terminal recessed into it. It runs off the
+            # bottom of the screen with the document, so it has no lower edge.
+            wx0, wy0, wx1 = x0 - lpad, y0 - tpad, x1 + rpad
+            d.rectangle([wx0, wy0, wx1 - 1, y1], fill=FACE)
+            d.line([(wx0, wy0), (wx1 - 1, wy0)], fill=WHITE)
+            d.line([(wx0, wy0), (wx0, y1)], fill=WHITE)
+            d.line([(wx1 - 1, wy0), (wx1 - 1, y1)], fill=SHADOW)
+            cy0, cy1 = wy0 + 1, wy0 + self.EMBED_TITLE_H
+            d.rectangle([wx0 + 1, cy0, wx1 - 2, cy1], fill=FACE)
+            d.line([(wx0 + 1, cy1 + 1), (wx1 - 2, cy1 + 1)], fill=SHADOW)
+            self._sysbox(d, wx0 + 2, wx0 + 14, cy0, cy1, 8)
+            d.text(((wx0 + wx1) // 2, (cy0 + cy1) // 2), self.embed_title,
+                   font=self.f.get("ui_bold", 10), fill=BLACK, anchor="mm")
+            bevel(d, (x0 - 1, y0 - 1, x1 + 1, y1), sunken=True)
+        else:
+            d.line([(x0 - 1, y0 - 1), (x1, y0 - 1)], fill=BLACK)
+            d.line([(x0 - 1, y0 - 1), (x0 - 1, y1)], fill=BLACK)
+            d.line([(x1, y0 - 1), (x1, y1)], fill=BLACK)
         if not self.handles:
             return
         # Only the handles that are on screen: the object's bottom edge is
         # below the frame, so its bottom row of handles is not there to draw.
-        for hx, hy in ((x0, y0), ((x0 + x1) // 2, y0), (x1, y0),
-                       (x0, (y0 + y1) // 2), (x1, (y0 + y1) // 2)):
+        hx0, hy0, hx1 = x0 - lpad, y0 - tpad, x1 + rpad
+        for hx, hy in ((hx0, hy0), ((hx0 + hx1) // 2, hy0), (hx1 - 1, hy0),
+                       (hx0, (hy0 + y1) // 2), (hx1 - 1, (hy0 + y1) // 2)):
             d.rectangle([hx - 2, hy - 2, hx + 2, hy + 2], fill=BLACK)
 
     # -- contents
