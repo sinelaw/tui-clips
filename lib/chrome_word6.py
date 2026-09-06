@@ -16,8 +16,8 @@ Selected from a spec with `render.chrome`:
       "body_lines": 2
     }
 
-and per beat, optionally, `bullet` (a Wingdings key), `misspell` (words to draw
-Word's red zigzag under) and `tip` (lines for the Assistant).
+and per beat, optionally, `bullet` (a Wingdings key) and `misspell` (words to
+draw Word's red zigzag under).
 
 Everything is drawn at logical screen pixels and scaled up with
 nearest-neighbour, so 1px bevels stay 1px and text keeps the aliased edge of a
@@ -56,7 +56,7 @@ SHADOW = (128, 128, 128)        # 3D shadow
 TITLE = (0, 0, 192)             # active title bar -- brighter than navy
 NAVY = (0, 0, 128)              # selection / extrusion shade
 TEAL = (0, 128, 128)            # the Win3.1 desktop
-INFO_BG = (255, 255, 206)       # tooltip / Assistant yellow
+INFO_BG = (255, 255, 206)       # tooltip yellow
 # Win3.1 menu bars are WHITE, not grey. Grey menus are a Win95 habit and are
 # the single fastest way to make a 1993 window look like a 1995 one.
 MENU_BG = WHITE
@@ -321,6 +321,7 @@ class Word6Chrome:
                ("pilcrow",)]
     TITLE_H = 18
     MENU_H = 18
+    MENU_GAP = 19
     BTN_H = 22
     BTN_GAP = 1
     GROUP_GAP = 8
@@ -341,7 +342,6 @@ class Word6Chrome:
         self.body_size = int(cfg.get("body_size", 12))
         self.body_lead = int(cfg.get("body_lead", 14))
         self.handles = bool(cfg.get("handles", True))
-        self.status_extra = cfg.get("status", "At 2.5\"   Ln 6   Col 1")
         self.art_opts = dict(cfg.get("wordart", {}))
 
         self._art: dict = {}
@@ -350,7 +350,7 @@ class Word6Chrome:
         self._vp_logical = (bx0 + 14,
                             by0 + 6 + self.head_h + 4
                             + self.body_lines * self.body_lead + 6,
-                            bx1 - 14, by1 - 8)
+                            bx1 - 14, by1)
         self._draw_embed_frame()
 
     # -- what the renderer needs
@@ -362,27 +362,12 @@ class Word6Chrome:
         return (x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s)
 
     def frame(self, head: str, sub, alpha: int = 255, page: int = 1,
-              total: int = 1, bullet=None, misspell=(), tip=None) -> Image.Image:
+              total: int = 1, bullet=None, misspell=()) -> Image.Image:
         """The window for one frame, upscaled, with a hole for the capture."""
         im = self.base.copy()
         d = ImageDraw.Draw(im)
         self._caption(im, d, head, sub, alpha, bullet, misspell)
-        self._status(d, page, total)
         return im.resize((self.OW, self.OH), Image.NEAREST)
-
-    def overlay(self, canvas: Image.Image, tip=None) -> None:
-        """Drawn *after* the capture is pasted. The Assistant leans over the
-        document, so anything under him — the embedded object included — has to
-        be down already or he is simply painted out."""
-        if not tip:
-            return
-        lay = Image.new("RGB", (self.W, self.H), FACE)
-        d = ImageDraw.Draw(lay)
-        mask = Image.new("L", (self.W, self.H), 0)
-        md = ImageDraw.Draw(mask)
-        self._assistant(d, tip, md)
-        canvas.paste(lay.resize((self.OW, self.OH), Image.NEAREST), (0, 0),
-                     mask.resize((self.OW, self.OH), Image.NEAREST))
 
     # -- the window itself
 
@@ -395,38 +380,47 @@ class Word6Chrome:
         fsm = self.f.get("ui", 10)
         mar = self.f.symbol("marlett", 10)
 
-        # window frame: 1px black, 2px face, 1px black
-        d.rectangle([0, 0, W - 1, H - 1], fill=FACE, outline=BLACK)
-        d.rectangle([3, 3, W - 4, H - 4], outline=BLACK)
+        # Window frame and the control column, straight off the reference's
+        # pixel grid. The title bar and menu bar do NOT start at the window
+        # edge: a face-coloured column runs down the left holding the two
+        # control-menu boxes, fenced off by a black rule at x=22.
+        # No bottom edge on either frame: the window is taller than the
+        # screen, so the document runs off it and there is visibly more to
+        # scroll to. That also buys the capture the rows a status bar would eat.
+        d.rectangle([0, 0, W - 1, H - 1], fill=FACE)
+        d.line([(0, 0), (W - 1, 0)], fill=BLACK)
+        d.line([(0, 0), (0, H - 1)], fill=BLACK)
+        d.line([(W - 1, 0), (W - 1, H - 1)], fill=BLACK)
+        d.line([(3, 3), (W - 4, 3)], fill=BLACK)
+        d.line([(3, 3), (3, H - 1)], fill=BLACK)
+        d.line([(W - 4, 3), (W - 4, H - 1)], fill=BLACK)
+        col_x0, col_x1 = 4, 21
+        bar_x0 = 23
 
         y = 4
-        # title bar
-        d.rectangle([4, y, W - 5, y + self.TITLE_H - 1], fill=TITLE)
-        d.text(((4 + W - 5) // 2, y + self.TITLE_H // 2), self.title,
+        ty0, ty1 = y, y + self.TITLE_H - 1
+        d.rectangle([bar_x0, ty0, W - 5, ty1], fill=TITLE)
+        d.text(((bar_x0 + W - 5) // 2, (ty0 + ty1) // 2), self.title,
                font=fuib, fill=WHITE, anchor="mm")
-        button(d, (5, y + 1, 24, y + self.TITLE_H - 1))
-        d.rectangle([10, y + self.TITLE_H // 2 - 2, 19, y + self.TITLE_H // 2 + 1],
-                    fill=FACE, outline=BLACK)
-        for i, g in enumerate("01"):        # Marlett: minimise, maximise
-            bx = W - 6 - (2 - i) * 20
-            button(d, (bx, y + 1, bx + 19, y + self.TITLE_H - 1))
-            if mar:
-                d.text((bx + 9, y + self.TITLE_H // 2), g, font=mar,
-                       fill=BLACK, anchor="mm")
-        y += self.TITLE_H
-        d.line([(4, y), (W - 5, y)], fill=BLACK)
+        self._sysbox(d, col_x0, col_x1, ty0, ty1, 13)
+        y = ty1 + 1
+        d.line([(3, y), (W - 4, y)], fill=BLACK)
         y += 1
 
-        # menu bar — white, as Windows 3.1 had it
-        d.rectangle([4, y, W - 5, y + self.MENU_H - 1], fill=MENU_BG)
-        mx = 14
+        # Menu bar — white, as Windows 3.1 had it. Label pitch is measured off
+        # the reference: text opens at x=31, labels ~19px apart, bold.
+        my0, my1 = y, y + self.MENU_H - 1
+        d.rectangle([bar_x0, my0, W - 5, my1], fill=MENU_BG)
+        self._sysbox(d, col_x0, col_x1, my0, my1, 7)
+        mx = 31
         for m in self.MENUS:
-            d.text((mx, y + 3), m, font=fui, fill=BLACK)
-            d.line([(mx, y + 14), (mx + d.textlength(m[0], font=fui), y + 14)],
-                   fill=BLACK)
-            mx += d.textlength(m, font=fui) + 16
-        y += self.MENU_H
-        d.line([(4, y), (W - 5, y)], fill=BLACK)
+            d.text((mx, my0 + 3), m, font=fuib, fill=BLACK)
+            w0 = d.textlength(m[0], font=fuib)
+            d.line([(mx, my0 + 14), (mx + w0 - 1, my0 + 14)], fill=BLACK)
+            mx += d.textlength(m, font=fuib) + self.MENU_GAP
+        y = my1 + 1
+        d.line([(22, ty0), (22, y - 1)], fill=BLACK)      # the column's fence
+        d.line([(3, y), (W - 4, y)], fill=BLACK)
         y += 1
 
         # one toolbar row: the real buttons, then the controls worth keeping
@@ -448,25 +442,18 @@ class Word6Chrome:
                     bx += 22 + self.BTN_GAP
             bx += self.GROUP_GAP
 
-        def combo(x, w, txt):
-            """A field and a *detached* drop-down button, as Word 6.0 drew it."""
-            d.rectangle([x, top + 2, x + w, top + self.BTN_H - 2], fill=WHITE)
-            bevel(d, (x, top + 2, x + w + 1, top + self.BTN_H - 1), sunken=True)
-            d.text((x + 4, top + 5), txt, font=fsm, fill=BLACK)
-            bb = x + w + 3
-            button(d, (bb, top + 1, bb + 15, top + self.BTN_H - 1))
-            if mar:
-                d.text((bb + 7, top + self.BTN_H // 2), "6", font=mar,
-                       fill=BLACK, anchor="mm")
-            return bb + 15
-
-        bx = combo(bx + 2, 88, "Times New Roman") + 6
-        bx = combo(bx, 30, "10") + 8
-        for lbl, role in (("B", "ui_bold"), ("I", "ui"), ("U", "ui")):
-            button(d, (bx, top, bx + 22, top + self.BTN_H))
-            d.text((bx + 11, top + self.BTN_H // 2), lbl,
-                   font=self.f.get(role, 13), fill=BLACK, anchor="mm")
-            bx += 23
+        # The reference's first toolbar row ends with the zoom field, so this
+        # one does too. The font and size combos live on the second row in the
+        # real thing; merging them in here only overflows the width.
+        zx, zw = bx + 2, 46
+        d.rectangle([zx, top + 1, zx + zw, top + self.BTN_H - 1], fill=WHITE)
+        bevel(d, (zx, top + 1, zx + zw + 1, top + self.BTN_H), sunken=True)
+        d.text((zx + zw // 2, top + self.BTN_H // 2 - 1), "100%",
+               font=self.f.get("ui_bold", 11), fill=BLACK, anchor="mm")
+        ax = zx + zw + 3
+        button(d, (ax, top, ax + 16, top + self.BTN_H))
+        d.polygon([(ax + 5, top + 9), (ax + 11, top + 9), (ax + 8, top + 13)],
+                  fill=BLACK)
         y = top + self.BTN_H + 3
         d.line([(4, y), (W - 5, y)], fill=SHADOW)
         d.line([(4, y + 1), (W - 5, y + 1)], fill=WHITE)
@@ -485,9 +472,10 @@ class Word6Chrome:
                 d.text((mx2 + 3, y + 7), gl, font=mar, fill=BLACK, anchor="mm")
         y += 15
 
-        doc = (4, y, W - 5, H - 38)
+        doc = (4, y, W - 5, H - 1)
         d.rectangle(list(doc), fill=WHITE)
-        bevel(d, (doc[0], doc[1], doc[2] + 1, doc[3] + 1), sunken=True)
+        d.line([(doc[0], doc[1]), (doc[2], doc[1])], fill=SHADOW)
+        d.line([(doc[0], doc[1]), (doc[0], H - 1)], fill=SHADOW)
         return im, doc
 
     def _draw_embed_frame(self):
@@ -498,12 +486,15 @@ class Word6Chrome:
         """
         d = ImageDraw.Draw(self.base)
         x0, y0, x1, y1 = self._vp_logical
-        d.rectangle([x0 - 1, y0 - 1, x1, y1], outline=BLACK)
+        d.line([(x0 - 1, y0 - 1), (x1, y0 - 1)], fill=BLACK)
+        d.line([(x0 - 1, y0 - 1), (x0 - 1, y1)], fill=BLACK)
+        d.line([(x1, y0 - 1), (x1, y1)], fill=BLACK)
         if not self.handles:
             return
+        # Only the handles that are on screen: the object's bottom edge is
+        # below the frame, so its bottom row of handles is not there to draw.
         for hx, hy in ((x0, y0), ((x0 + x1) // 2, y0), (x1, y0),
-                       (x0, (y0 + y1) // 2), (x1, (y0 + y1) // 2),
-                       (x0, y1), ((x0 + x1) // 2, y1), (x1, y1)):
+                       (x0, (y0 + y1) // 2), (x1, (y0 + y1) // 2)):
             d.rectangle([hx - 2, hy - 2, hx + 2, hy + 2], fill=BLACK)
 
     # -- contents
@@ -544,46 +535,21 @@ class Word6Chrome:
                              ty + self.body_size + 2)
             ty += self.body_lead
 
-    def _assistant(self, d, lines, md=None):
-        """The paperclip. He belongs to Word 97 and is three years early.
+    def _sysbox(self, d, cx0, cx1, by0, by1, w):
+        """A Windows 3.1 control-menu box.
 
-        `md` collects his silhouette, so the caller can composite just him
-        rather than a rectangle of document around him.
+        Not a bevelled button — a flat black-outlined bar with a white fill and
+        a one-pixel grey drop shadow, centred in the control column. The
+        application's is wide, the document's is half that; the difference is
+        the only thing distinguishing the two, so it is worth getting right.
         """
-        x1b, y1b = self.document[2] - 14, self.document[3] - 14
-        x0, y0, x1, y1 = x1b - 182, y1b - 54, x1b, y1b
-        if md is not None:
-            md.rectangle([x0, y0, x1, y1], fill=255)
-            md.rounded_rectangle([x0 - 38, y0 + 4, x0 - 8, y0 + 48],
-                                 radius=13, fill=255)
-        d.rectangle([x0, y0, x1, y1], fill=INFO_BG, outline=BLACK)
-        d.text((x0 + 7, y0 + 6), lines[0], font=self.f.get("ui_bold", 10), fill=BLACK)
-        y = y0 + 19
-        for ln in lines[1:]:
-            d.text((x0 + 7, y), ln, font=self.f.get("ui", 10), fill=BLACK)
-            y += 12
-        cx, cy = x0 - 24, y0 + 24
-        for r in (11, 6):
-            d.rounded_rectangle([cx - r, cy - r - 7, cx + r, cy + r + 11],
-                                radius=r, outline=(100, 100, 120), width=3)
-        for ex in (cx - 5, cx + 4):
-            d.ellipse([ex - 4, cy - 15, ex + 4, cy - 7], fill=WHITE, outline=BLACK)
-            d.ellipse([ex - 2, cy - 13, ex + 1, cy - 10], fill=BLACK)
+        x0 = (cx0 + cx1) // 2 - w // 2
+        x1 = x0 + w - 1
+        y0 = (by0 + by1) // 2 - 1
+        d.rectangle([x0, y0, x1, y0 + 2], fill=WHITE, outline=BLACK)
+        d.line([(x1 + 1, y0 + 1), (x1 + 1, y0 + 2)], fill=SHADOW)
+        d.line([(x0 + 1, y0 + 3), (x1 + 1, y0 + 3)], fill=SHADOW)
 
-    def _status(self, d, page, total):
-        W, H = self.W, self.H
-        fsm = self.f.get("ui", 10)
-        sy = H - 34
-        d.rectangle([4, sy, W - 5, H - 5], fill=FACE)
-        d.line([(4, sy), (W - 5, sy)], fill=SHADOW)
-        d.line([(4, sy + 1), (W - 5, sy + 1)], fill=WHITE)
-        for fx, txt in ((12, f"Page {page}    Sec 1     {page}/{total}"),
-                        (166, self.status_extra),
-                        (W - 146, "REC  MRK"), (W - 82, "EXT  OVR  WPH")):
-            d.text((fx, sy + 9), txt, font=fsm, fill=BLACK)
-        for sx in (158, W - 156, W - 92):
-            d.line([(sx, sy + 5), (sx, H - 10)], fill=SHADOW)
-            d.line([(sx + 1, sy + 5), (sx + 1, H - 10)], fill=WHITE)
 
 
 STYLES = {"word6": Word6Chrome}
