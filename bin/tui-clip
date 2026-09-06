@@ -45,6 +45,18 @@ def shot_path(shot: str, pane: str, shots_dir: str, ctx: dict) -> str:
     return os.path.join(shots_dir, f"{pane}-{shot}.png")
 
 
+def run_dir(name: str, pane: str, shots_dir: str) -> str:
+    """where a `{"record": ...}` step writes its frame sequence"""
+    return os.path.join(shots_dir, f"{pane}-{name}")
+
+
+def run_frames(name: str, pane: str, shots_dir: str) -> list[str]:
+    d = run_dir(name, pane, shots_dir)
+    if not os.path.isdir(d):
+        return []
+    return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(".png")]
+
+
 def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
             shots_dir: str) -> None:
     cap = spec["capture"]
@@ -75,6 +87,12 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
             argv += ["--sleep", str(step["sleep"])]
         elif "shot" in step:
             argv += ["--shot", shot_path(step["shot"], pane, shots_dir, ctx)]
+        elif "record" in step:
+            # Film the window rather than photographing it: anything moving
+            # under its own clock is sampled wrong by `import`.
+            argv += ["--record", "{}:{}:{}".format(
+                run_dir(step["record"], pane, shots_dir),
+                step.get("seconds", 5), step.get("fps", 30))]
     argv += ["--"] + [expand(a, ctx) for a in p["argv"]]
     print(f"  capturing {pane} ...", flush=True)
     subprocess.run(argv, check=True, stdout=subprocess.DEVNULL)
@@ -131,24 +149,36 @@ def main() -> None:
                             "--display", spec["capture"].get("display", ":99")],
                            check=False)
 
-    shots = {}
+    shots, runs = {}, {}
     for pane in panes:
         for step in [*spec["capture"].get("keys", []),
                      *spec["capture"]["panes"][pane].get("keys", [])]:
-            n = step.get("shot") if isinstance(step, dict) else None
+            if not isinstance(step, dict):
+                continue
+            n = step.get("shot")
             if n and "/" not in n and "{" not in n:
                 shots[n] = shot_path(n, pane, shots_dir, {})
+            r = step.get("record")
+            if r:
+                runs[r] = run_frames(r, pane, shots_dir)
 
     for f in [*captures.values(), *shots.values()]:
         if not os.path.exists(f):
             raise SystemExit(f"missing capture {f} (drop --skip-capture?)")
+    for rname, seq in runs.items():
+        if not seq:
+            raise SystemExit(
+                f"recording {rname!r} produced no frames in "
+                f"{run_dir(rname, panes[0], shots_dir)} (drop --skip-capture?)")
     if args.stills:
         for f in [*captures.values(), *shots.values()]:
             print(f)
+        for rname, seq in runs.items():
+            print(f"{rname}: {len(seq)} frames")
         return
 
     print(f"  rendering frames ({mode}) ...", flush=True)
-    r = render.make(spec, captures, frames, shots)
+    r = render.make(spec, captures, frames, shots, runs)
     nf = r.run()
     dur = nf / r.fps
     print(f"  {nf} frames, {dur:.2f}s")

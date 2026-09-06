@@ -54,6 +54,109 @@ an overlay's pixels sit in the image at the rows the things underneath occupy �
 cut those out as they are and every one of them carries a copy of the overlay
 away with it.
 
+## Recording: when a screenshot is the wrong instrument
+
+`{"shot": ...}` photographs the window with ImageMagick's `import`, which costs
+200-400ms a frame and jitters. That is fine for a screen holding still and
+useless for one that is not: anything driven by a wall clock — an animation, a
+transition, a simulation — gets sampled at four or five frames a second, at
+moments you did not choose. Film it instead.
+
+```jsonc
+"keys": [
+  {"record": "wave", "seconds": 16, "fps": 30},   // starts ffmpeg, does NOT wait
+  {"sleep": 1},                                   // ... so this second is filmed
+  {"key": "F9"}                                   // ... and so is what it starts
+]
+```
+
+Recording does not block the key sequence, which is the point: put the
+`record` before the keystroke that starts the thing, and the clip opens on the
+screen at rest. The run ends on its own after `seconds`; the sequence waits for
+it at the end. Frames land beside the shots and a beat plays the whole run by
+naming it as a string:
+
+```jsonc
+{"shots": "wave", "hold": 16, "head": "...", "sub": ["...", "..."]}
+```
+
+A `shots` **array** steps through named stills across the dwell; a `shots`
+**string** plays a recorded run straight through. Give the beat a `hold` equal
+to the recording's `seconds` and it plays at the rate it was filmed at. Frames
+are opened as needed rather than held in memory — a few seconds at 30fps is
+several gigabytes decoded, and each frame is wanted for about two output frames
+and then never again.
+
+## Typing
+
+A beat may set its `sub` one character at a time, with a caret:
+
+```jsonc
+{"shots": "wave", "hold": 16, "typewriter": 0.5,
+ "head": "Fresh: The Wave", "sub": ["first line", "second line"]}
+```
+
+The value is the share of the dwell the typing takes, so the sentence lands
+before the beat does and the rest of the hold is spent reading it rather than
+waiting for it. The caret is solid while typing and blinks once it has stopped.
+The reveal is spent over the whole paragraph rather than per line, so a long
+first line does not race a short second one, and a word only gets its
+`misspell` squiggle once it has been typed in full.
+
+Pair it with a recorded run and the clip is one continuous shot: the thing
+plays at speed while the explanation writes itself over it.
+
+## Chrome: the window a clip is explained inside
+
+A solo clip may name a `render.chrome`. Instead of the dark ground, the header
+band and the caption bar, the frame becomes a period application window: the
+capture is composited into its document area as an embedded object, and each
+beat's `head` and `sub` are set inside that document. The storyboard does not
+change — intro, zoom, one beat per annotation, outro — only where the words go.
+
+```jsonc
+"chrome": {
+  "style": "word6",                        // the only one so far
+  "assets": "~/Documents/fresh-clip-assets",
+  "scale": 3,                              // must divide render.size
+  "headline_height": 38,
+  "body_lines": 2
+}
+```
+
+A beat may then also carry `bullet` (a Wingdings key, drawn beside the body)
+and `misspell` (words to draw Word's red spelling zigzag under). `sub` may be a
+list of lines rather than one string.
+
+`"layout": "side"` puts the WordArt in a left column with the body beside it,
+instead of a headline across the top. That is for a clip that has to be legible
+in a timeline at thumbnail size: the same words get roughly twice the type
+size, paid for out of the document's width rather than the capture's. Size it
+with `headline_width` (the left column, as a fraction), `header_block` (the
+band's height) and `body_size` / `body_lead` / `body_lines`. Whatever the
+header leaves is the viewport — so match the capture's geometry to that aspect,
+or the camera crops the screen to fit it.
+
+`word6` is Microsoft Word 6.0 on Windows 3.1, and its `head` is set in WordArt
+2.0 — dithered gradient face, black outline, a stamped 3D extrusion, and the
+sinusoidal baseline its "Wave" style was named for. Everything but the capture
+is drawn at logical screen pixels and scaled up with nearest neighbour, so 1px
+bevels stay 1px and the UI text keeps the aliased edge of a bitmap font; only
+the capture is composited at full resolution, so the terminal stays legible
+inside a deliberately chunky window.
+
+The period faces (Wingdings, Impact, Times New Roman, Microsoft Sans Serif,
+Marlett) and the toolbar artwork ship with Windows and are licensed with it, so
+neither is vendored. `assets` points at a directory holding them — `fonts/` for
+the faces, `word6-toolbar.png` and its `.json` index for the buttons. Each
+falls back: a missing face becomes a free one, missing buttons become Wingdings
+glyphs. The chrome always renders, just less convincingly.
+
+Two defaults change under a chrome. The dimmed band is off unless a beat asks
+for `"band": true` — a rectangle drawn over a page reads as a video overlay,
+not as a document. And `rows` becomes optional, defaulting to the whole
+capture, since a beat that fills the document has no smaller rect to frame.
+
 The mode is `explode` when the spec has a `render.explode`, else it is inferred
 from the pane set. For the first two, everything after the opening — the zoom,
 the dimmed bands, the captions, the outro — is identical.
@@ -94,6 +197,7 @@ the dimmed bands, the captions, the outro — is identical.
     "fps": 60,
     "rows": 50, "cols": 64,           // must match capture geometry
     "title": "app - feature",
+    "chrome": {"style": "word6", "assets": "~/assets"},  // optional; see below
     "labels": {"before": "BEFORE", "after": "AFTER", "solo": "NEW"},
     "note_size": 54,                          // the callout text, in px
     "title_card": {                           // a card before the clip

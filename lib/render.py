@@ -15,6 +15,12 @@ From there both are the same:
     pan     travel between annotations, captions cross-fading
     outro   the dim releases and the end caption appears
 
+A solo clip may also name a `render.chrome`: a period application window that
+wraps the viewport and hosts the captions, in place of the header band and the
+caption bar. The storyboard is unchanged — intro, zoom, one beat per
+annotation, outro — but the capture is composited into the window's document
+area, and the beat's head and sub are set inside it. See `chrome_word6`.
+
 The third, `explode`, is a different storyboard on one capture: the screen is
 taken apart into the rects a set of annotated pieces name, and the camera
 visits each one in turn. A piece that has pieces of its own bursts open in
@@ -30,6 +36,8 @@ import glob
 import math
 import os
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+
+import chrome_word6
 
 BOLD = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 # Colour emoji are bitmaps, and Noto's are cut at exactly one size: asking
@@ -105,16 +113,18 @@ def subject_pane(spec: dict) -> str:
 
 
 def make(spec: dict, captures: dict[str, str], outdir: str,
-         shots: dict[str, str] | None = None):
+         shots: dict[str, str] | None = None,
+         runs: dict[str, list[str]] | None = None):
     """the renderer this spec asks for"""
     if mode_of(spec) == "explode":
         return ExplodeRenderer(spec, captures, outdir)
-    return Renderer(spec, captures, outdir, shots)
+    return Renderer(spec, captures, outdir, shots, runs)
 
 
 class Renderer:
     def __init__(self, spec: dict, captures: dict[str, str], outdir: str,
-                 shots: dict[str, str] | None = None):
+                 shots: dict[str, str] | None = None,
+                 runs: dict[str, list[str]] | None = None):
         r = spec["render"]
         self.spec = spec
         self.r = r
@@ -147,6 +157,21 @@ class Renderer:
                     "every shot must come from the same run")
             self.shots[nm] = img
 
+        # Recorded runs: a `{"record": ...}` step films the window with x11grab
+        # instead of photographing it, and a beat plays the whole sequence by
+        # naming it in `shots`. Frames stay on disk and are opened as needed --
+        # a few seconds at 30fps is several gigabytes decoded, and each frame is
+        # wanted for about two output frames and then never again.
+        self.runs = dict(runs or {})
+        self._runcache: dict = {}
+        for nm, frames in self.runs.items():
+            probe = Image.open(frames[0])
+            if probe.size != self.A.size:
+                raise SystemExit(
+                    f"recording {nm!r} is {probe.size}, capture is "
+                    f"{self.A.size}; both come from the same window, so this "
+                    "means the window moved or resized mid-run")
+
         self.rows = int(r["rows"])
         self.cols = int(r["cols"])
         self.RH = self.IH / self.rows
@@ -165,6 +190,22 @@ class Renderer:
                        for a in r.get("annotations", []))
         self.cap_y = self.H - (self.cap_h if self.bar else 0)
         self.vp = (0, self.header_h, self.W, self.cap_y - self.header_h)
+
+        # A chrome owns the whole frame: it supplies the viewport the capture
+        # lands in, and it draws the captions itself. The header band and the
+        # caption bar are then never painted -- they would sit on top of a
+        # window that already has somewhere to put both.
+        self.chrome = None
+        if r.get("chrome"):
+            if self.mode == "compare":
+                raise SystemExit(
+                    "render.chrome is for solo clips; a comparison puts two "
+                    "captures side by side and a document has room for one")
+            self.chrome = chrome_word6.make(
+                r["chrome"], (self.W, self.H), r.get("title", "Untitled"))
+            self.vp = self.chrome.viewport()
+            self.header_h = self.vp[1]
+            self.cap_y = self.vp[1] + self.vp[3]
 
         th = dict(DEFAULT_THEME)
         th.update(r.get("theme", {}))
@@ -201,6 +242,11 @@ class Renderer:
             if a.get("view") and a["view"] not in self.views:
                 raise SystemExit(
                     f"annotation view {a['view']!r} is not in render.views")
+            run = a.get("shots")
+            if isinstance(run, str) and run not in self.runs:
+                raise SystemExit(
+                    f'annotation shots {run!r} was never recorded; add '
+                    f'{{"record": "{run}", "seconds": N}} to capture.keys')
             if a.get("shot") and a["shot"] not in self.shots:
                 raise SystemExit(
                     f"annotation shot {a['shot']!r} was never taken; add "
@@ -221,10 +267,16 @@ class Renderer:
 
         # intro panel geometry, derived so it always fits the canvas
         label_h, gutter, margin = 44, 24, 16
-        self.panel_y = self.header_h + label_h
-        avail_h = self.cap_y - self.panel_y - 6
-        avail_w = ((self.W - 2 * margin - gutter) / 2 if self.mode == "compare"
-                   else self.W - 2 * margin)
+        if self.chrome:
+            # No room for a label above the panel: the establishing shot is the
+            # document's own page, so the capture opens small inside it.
+            self.panel_y = self.vp[1]
+            avail_h, avail_w = self.vp[3], self.vp[2]
+        else:
+            self.panel_y = self.header_h + label_h
+            avail_h = self.cap_y - self.panel_y - 6
+            avail_w = ((self.W - 2 * margin - gutter) / 2 if self.mode == "compare"
+                       else self.W - 2 * margin)
         self.s_a = min(avail_w / self.IW, avail_h / self.IH)
         self.panel_w = self.IW * self.s_a
         self.panel_h = self.IH * self.s_a
@@ -233,7 +285,8 @@ class Renderer:
             self.ax = self.bx + self.panel_w + gutter
         else:
             self.bx = None
-            self.ax = (self.W - self.panel_w) / 2
+            self.ax = (self.vp[0] + (self.vp[2] - self.panel_w) / 2 if self.chrome
+                       else (self.W - self.panel_w) / 2)
         self.s_c = self.vp[2] / self.IW
 
         self.f_label = ImageFont.truetype(BOLD, 40)
@@ -279,8 +332,12 @@ class Renderer:
         return a.get("label", self.lead), self.th[a.get("tone", "after")]
 
     def rect_of(self, a: dict):
-        """a {rows, cols} rect in source pixels -- (x0, y0, x1, y1)"""
-        r0, r1 = a["rows"]
+        """a {rows, cols} rect in source pixels -- (x0, y0, x1, y1)
+
+        `rows` is optional: a beat under a chrome fills the document and has no
+        smaller rect to frame, so it defaults to the whole capture.
+        """
+        r0, r1 = a.get("rows", [0, self.rows])
         c0, c1 = a.get("cols", [0, self.cols])
         return (c0 * self.CW, r0 * self.RH, c1 * self.CW, r1 * self.RH)
 
@@ -292,7 +349,8 @@ class Renderer:
         """source-y that centres annotation i, clamped inside the image"""
         a = self.ann[i]
         half = self.vp[3] / self.s_c / 2
-        cy = (a["rows"][0] + a["rows"][1]) / 2 * self.RH
+        rows = a.get("rows", [0, self.rows])
+        cy = (rows[0] + rows[1]) / 2 * self.RH
         if self.IH <= 2 * half:          # capture shorter than the viewport
             return self.IH / 2
         return max(half, min(self.IH - half, cy))
@@ -364,6 +422,15 @@ class Renderer:
     # softer join sets `crossfade` on the beat.
     STEP_XF = 0.0
 
+    def run_image(self, name: str, k: int):
+        """frame `k` of a recorded run, off disk, with a shallow cache."""
+        key = (name, k)
+        if key not in self._runcache:
+            if len(self._runcache) > 6:
+                self._runcache.clear()
+            self._runcache[key] = Image.open(self.runs[name][k]).convert("RGB")
+        return self._runcache[key]
+
     def shot(self, i: int, hp: float = 0.0):
         """what beat i is drawn on at hold-progress `hp`.
 
@@ -373,6 +440,13 @@ class Renderer:
         """
         a = self.ann[i]
         run = a.get("shots")
+        if isinstance(run, str):
+            # A recorded run: played straight through across the dwell, so the
+            # motion comes out at the rate it was filmed at rather than stepped.
+            frames = self.runs[run]
+            n = len(frames)
+            k = min(int(min(hp, 0.999999) * n), n - 1)
+            return self.run_image(run, k), f"run:{run}:{k}"
         if not run:
             nm = a.get("shot")
             return (self.shots[nm], f"shot:{nm}") if nm else (self.A, "A")
@@ -775,6 +849,38 @@ class Renderer:
                fill=fade_c(th["muted"], int(150 * fade)), anchor="mm")
         return cv
 
+    def caption_at(self, p: float, ai: int, pan: float, rel: float):
+        """(head, sub, alpha, beat, is_beat) for this moment.
+
+        The intro caption cross-fades into beat one, each beat into the next
+        across its pan, and the last into the outro. `is_beat` is False while
+        an intro or outro caption is the one showing, so a chrome knows not to
+        decorate it with a beat's bullet.
+        """
+        nxt = min(ai + 1, len(self.ann) - 1)
+        head, sub, ca, idx, beat = self.cap_intro[0], self.cap_intro[1], 255, 0, False
+        if 0.0 < p < 1.0:
+            if p < 0.5:
+                ca = int(255 * (1 - p / 0.5))
+            else:
+                ca = int(255 * ((p - 0.5) / 0.5))
+                (head, sub), beat = cap_of(self.ann[0]), True
+        elif p >= 1.0:
+            (head, sub), idx, beat = cap_of(self.ann[ai]), ai, True
+            if pan > 0:
+                if pan < 0.5:
+                    ca = int(255 * (1 - pan / 0.5))
+                else:
+                    ca = int(255 * ((pan - 0.5) / 0.5))
+                    (head, sub), idx = cap_of(self.ann[nxt]), nxt
+            if rel > 0:
+                if rel < 0.45:
+                    ca = int(255 * (1 - rel / 0.45))
+                else:
+                    ca = int(255 * ((rel - 0.45) / 0.55))
+                    head, sub, beat = self.cap_outro[0], self.cap_outro[1], False
+        return head, sub, ca, idx, beat
+
     def frame(self, n: int) -> Image.Image:
         th, W, H = self.th, self.W, self.H
         t = n / self.fps
@@ -785,7 +891,28 @@ class Renderer:
         p, ai, pan, rel, hp = self.phase(t)
         nxt = min(ai + 1, len(self.ann) - 1)
 
-        cv = Image.new("RGB", (W, H), th["bg"])
+        head, sub, ca, cidx, is_beat = self.caption_at(p, ai, pan, rel)
+        if self.chrome:
+            a = self.ann[cidx] if is_beat else {}
+            # A `typewriter` beat sets its sub one character at a time, with a
+            # caret. The value is the share of the dwell the typing takes, so
+            # the sentence lands before the beat does and the rest of the hold
+            # is spent reading it rather than waiting for it.
+            reveal = caret = None
+            tw = a.get("typewriter")
+            if tw and p >= 1.0 and rel <= 0:
+                until = float(tw) if not isinstance(tw, bool) else 0.8
+                reveal = min(1.0, hp / until) if until > 0 else 1.0
+                # Solid while typing; blinking once it has stopped, which is
+                # what an idle caret does and what says the typing is finished.
+                caret = reveal < 1.0 or int(t * 1.6) % 2 == 0
+            cv = self.chrome.frame(head, sub, ca, page=cidx + 1,
+                                   total=len(self.ann),
+                                   bullet=a.get("bullet"),
+                                   misspell=a.get("misspell", ()),
+                                   reveal=reveal, caret=caret)
+        else:
+            cv = Image.new("RGB", (W, H), th["bg"])
         d = ImageDraw.Draw(cv)
 
         s_i, cx_i, cy_i = self.cam(ai)
@@ -812,7 +939,8 @@ class Renderer:
 
         # subject panel, growing from the intro shot to the full viewport
         cwi, chi = int(round(cw)), int(round(ch))
-        lay = Image.new("RGB", (cwi, chi), th["bg"])
+        lay = Image.new("RGB", (cwi, chi),
+                        self.chrome.fill if self.chrome else th["bg"])
         px = int(round(cwi / 2 - src_cx * s))
         py = int(round(chi / 2 - src_cy * s))
         # A push replaces the screen instead of dissolving into it: the old
@@ -837,8 +965,12 @@ class Renderer:
 
         # A beat with `band: false` is the screen alone -- nothing dimmed and
         # no frame drawn -- for a run of shots whose own movement is the point.
-        lit = lerp(0.0 if self.ann[ai].get("band") is False else 1.0,
-                   0.0 if self.ann[nxt].get("band") is False else 1.0, pan)
+        # A rectangle with an accent tick drawn over a document page reads as a
+        # video overlay rather than as part of the page, so a chrome turns the
+        # band off unless a beat asks for it back.
+        band_default = not self.chrome
+        lit = lerp(0.0 if not self.ann[ai].get("band", band_default) else 1.0,
+                   0.0 if not self.ann[nxt].get("band", band_default) else 1.0, pan)
         if push:
             # nothing is drawn over a screen that is on its way out
             lit = 0.0
@@ -879,9 +1011,11 @@ class Renderer:
         lay = self.vignetted(lay, max(0.0, (p - 0.55) / 0.45))
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
-        if p < 0.9 and not self.vignette:
+        if p < 0.9 and not self.vignette and not self.chrome:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
                         outline=th["panel_border"], width=2)
+        if self.chrome:
+            return cv
 
         # header: intro labels cross-fade into a single banner
         d.rectangle([0, 0, W, self.panel_y - 44 if p < 0.5 else self.vp[1]],
@@ -921,28 +1055,6 @@ class Renderer:
         if self.bar:
             d.rectangle([0, self.cap_y, W, self.cap_y + 3],
                         fill=fade_c(accent, 200))
-
-        head, sub, ca = self.cap_intro[0], self.cap_intro[1], 255
-        if 0.0 < p < 1.0:
-            if p < 0.5:
-                ca = int(255 * (1 - p / 0.5))
-            else:
-                ca = int(255 * ((p - 0.5) / 0.5))
-                head, sub = cap_of(self.ann[0])
-        elif p >= 1.0:
-            head, sub = cap_of(self.ann[ai])
-            if pan > 0:
-                if pan < 0.5:
-                    ca = int(255 * (1 - pan / 0.5))
-                else:
-                    ca = int(255 * ((pan - 0.5) / 0.5))
-                    head, sub = cap_of(self.ann[nxt])
-            if rel > 0:
-                if rel < 0.45:
-                    ca = int(255 * (1 - rel / 0.45))
-                else:
-                    ca = int(255 * ((rel - 0.45) / 0.55))
-                    head, sub = self.cap_outro
 
         # No tick without words beside it. A clip that says its piece in the
         # frame leaves this bar empty, and an accent mark alone in an empty bar
@@ -1116,6 +1228,7 @@ class ExplodeRenderer:
         self.cap_h = int(r.get("caption_height", 132))
         self.cap_y = self.H - self.cap_h
         self.vp = (0, self.header_h, self.W, self.cap_y - self.header_h)
+
 
         th = dict(DEFAULT_THEME)
         th.update(r.get("theme", {}))
