@@ -251,17 +251,44 @@ def wordart(text: str, fonts: Fonts, size: int = 54, fill=RAINBOW,
     return out
 
 
-def fit_wordart(text: str, fonts: Fonts, maxw: int, maxh: int, **kw) -> Image.Image:
-    """Largest WordArt of `text` that fits the measure. Binary search on size."""
+def fit_wordart(text, fonts: Fonts, maxw: int, maxh: int, gap: int = 2,
+                **kw) -> Image.Image:
+    """Largest WordArt of `text` that fits the measure. Binary search on size.
+
+    `text` may be a list, in which case the lines are stacked and share one
+    type size — sized independently they would each fill the width and a short
+    word would come out bigger than a long one, which is not how a headline
+    works. Stacking is what makes a narrow column usable: two short words get
+    several times the size one long line could, which is the whole reason the
+    side layout has a column rather than a strip.
+    """
+    lines = list(text) if isinstance(text, (list, tuple)) else [text]
+
+    def build(size):
+        arts = [wordart(l, fonts, size=size, **kw) for l in lines]
+        w = max(a.size[0] for a in arts)
+        h = sum(a.size[1] for a in arts) + gap * (len(arts) - 1)
+        return arts, w, h
+
     lo, hi, best = 8, 120, None
     while lo <= hi:
         mid = (lo + hi) // 2
-        art = wordart(text, fonts, size=mid, **kw)
-        if art.size[0] <= maxw and art.size[1] <= maxh:
-            best, lo = art, mid + 1
+        arts, w, h = build(mid)
+        if w <= maxw and h <= maxh:
+            best, lo = (arts, w, h), mid + 1
         else:
             hi = mid - 1
-    return best if best is not None else wordart(text, fonts, size=8, **kw)
+    if best is None:
+        best = build(8)
+    arts, w, h = best
+    if len(arts) == 1:
+        return arts[0]
+    out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    y = 0
+    for a in arts:
+        out.paste(a, ((w - a.size[0]) // 2, y), a)
+        y += a.size[1] + gap
+    return out
 
 # ------------------------------------------------------------ the chrome
 
@@ -519,8 +546,9 @@ class Word6Chrome:
 
     # -- contents
 
-    def _art_for(self, text: str, maxw: int, maxh: int):
-        key = (text, maxw, maxh)
+    def _art_for(self, text, maxw: int, maxh: int):
+        key = (tuple(text) if isinstance(text, (list, tuple)) else text,
+               maxw, maxh)
         if key not in self._art:
             if len(self._art) > 24:
                 self._art.clear()
