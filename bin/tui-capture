@@ -14,6 +14,19 @@
 # --shot takes a screenshot mid-sequence, in among the keys. That is how a
 # capture and something the program can only tell you afterwards — a UI tree
 # dump, say — come from one run and so describe the same screen.
+#
+# --record DIR:SECONDS:FPS films the window instead of photographing it, with
+# ffmpeg's x11grab straight off the Xvfb display. `import` costs 200-400ms a
+# frame and jitters, which is fine for a screen that is holding still and
+# useless for one that is not: anything driven by a wall clock — an animation,
+# a transition, a simulation — has to be recorded, not sampled. Frames land in
+# DIR as 0001.png upward, and a spec turns the run into a beat's `shots`.
+#
+# Recording does NOT block: ffmpeg is started and the key sequence carries on
+# over it, so the steps that follow are filmed. That is what lets a clip open
+# on the screen at rest and then show the thing being triggered — put the
+# --record before the keystroke that starts it, and a --sleep in between. The
+# run ends on its own after SECONDS; the sequence waits for it at the end.
 set -euo pipefail
 
 DISPLAY_NUM=":99"
@@ -42,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --env)      ENVS+=("$2");     shift 2 ;;
     --key)      ACTIONS+=("key:$2");   shift 2 ;;
     --shot)     ACTIONS+=("shot:$2");  shift 2 ;;
+    --record)   ACTIONS+=("record:$2"); shift 2 ;;
     --type)     ACTIONS+=("type:$2");  shift 2 ;;
     --sleep)    ACTIONS+=("sleep:$2"); shift 2 ;;
     --keep-display) KEEP=1; shift ;;
@@ -69,7 +83,7 @@ fi
 [[ $# -gt 0 ]] || die "no command given (put it after --)"
 CMD=("$@")
 
-for t in Xvfb xfce4-terminal xdotool import; do
+for t in Xvfb xfce4-terminal xdotool import ffmpeg; do
   command -v "$t" >/dev/null || die "missing required tool: $t"
 done
 
@@ -106,6 +120,7 @@ WID="$(xdotool search --name "Terminal - " | tail -1 || true)"
 xdotool windowfocus "$WID"
 sleep 0.5
 
+REC_PIDS=(); REC_DIRS=()
 for a in "${ACTIONS[@]:-}"; do
   [[ -n "$a" ]] || continue
   case "$a" in
@@ -124,7 +139,27 @@ for a in "${ACTIONS[@]:-}"; do
     sleep:*) sleep "${a#sleep:}" ;;
     shot:*)  mkdir -p "$(dirname "${a#shot:}")"
              import -window "$WID" "${a#shot:}" ;;
+    record:*)
+             IFS=: read -r rdir rsecs rfps <<< "${a#record:}"
+             mkdir -p "$rdir"
+             # Grab the window's rectangle off the display rather than the
+             # window itself: x11grab takes a screen region, and on a headless
+             # Xvfb the window is the only thing in it anyway.
+             eval "$(xdotool getwindowgeometry --shell "$WID")"
+             # x11grab wants even dimensions for most encoders; PNG does not
+             # care, but keeping it even avoids a stride surprise if the frames
+             # are ever muxed straight to video.
+             ffmpeg -v error -y -f x11grab -draw_mouse 0 \
+                    -video_size "$((WIDTH - WIDTH % 2))x$((HEIGHT - HEIGHT % 2))" \
+                    -framerate "$rfps" -i "${DISPLAY_NUM}+${X},${Y}" \
+                    -t "$rsecs" -fps_mode passthrough "$rdir/%04d.png" &
+             REC_PIDS+=("$!"); REC_DIRS+=("$rdir") ;;
   esac
+done
+# Let any recording run out its clock before the window is torn down.
+for pid in "${REC_PIDS[@]:-}"; do [[ -n "$pid" ]] && wait "$pid" || true; done
+for d in "${REC_DIRS[@]:-}"; do
+  [[ -n "$d" ]] && echo "recorded $(ls "$d" | wc -l) frames -> $d" >&2
 done
 sleep 1.5
 

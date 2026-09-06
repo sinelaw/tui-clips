@@ -337,20 +337,35 @@ class Word6Chrome:
         self.f = Fonts(cfg.get("assets"))
         self.icons = Icons(cfg.get("assets"))
         self.title = cfg.get("title", title_default)
+        # "stack" sets the headline across the top with the body beneath it;
+        # "side" puts the WordArt in a left column with the body beside it. The
+        # side layout exists for clips that have to be legible in a timeline at
+        # thumbnail size: the same words get roughly three times the type size,
+        # paid for out of the document's width rather than the capture's.
+        self.layout = cfg.get("layout", "stack")
         self.head_h = int(cfg.get("headline_height", 38))
+        self.head_w = float(cfg.get("headline_width", 0.36))
+        self.head_block = int(cfg.get("header_block", 0))
         self.body_lines = int(cfg.get("body_lines", 2))
         self.body_size = int(cfg.get("body_size", 12))
         self.body_lead = int(cfg.get("body_lead", 14))
         self.handles = bool(cfg.get("handles", True))
         self.art_opts = dict(cfg.get("wordart", {}))
 
+        # What the renderer fills the growing intro panel with, so the capture
+        # opens on the document's own paper rather than on a clip background.
+        self.fill = WHITE
         self._art: dict = {}
         self.base, self.document = self._build()
         bx0, by0, bx1, by1 = self.document
-        self._vp_logical = (bx0 + 14,
-                            by0 + 6 + self.head_h + 4
-                            + self.body_lines * self.body_lead + 6,
-                            bx1 - 14, by1)
+        if self.layout == "side":
+            block = self.head_block or (self.body_lines * self.body_lead + 16)
+            self.head_block = block
+            top = by0 + block
+        else:
+            top = (by0 + 6 + self.head_h + 4
+                   + self.body_lines * self.body_lead + 6)
+        self._vp_logical = (bx0 + 14, top, bx1 - 14, by1)
         self._draw_embed_frame()
 
     # -- what the renderer needs
@@ -362,11 +377,16 @@ class Word6Chrome:
         return (x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s)
 
     def frame(self, head: str, sub, alpha: int = 255, page: int = 1,
-              total: int = 1, bullet=None, misspell=()) -> Image.Image:
-        """The window for one frame, upscaled, with a hole for the capture."""
+              total: int = 1, bullet=None, misspell=(), reveal=None,
+              caret=None) -> Image.Image:
+        """The window for one frame, upscaled, with a hole for the capture.
+
+        `reveal` is the share of the body text that has been typed so far;
+        `caret` whether to draw the insertion point at the end of it.
+        """
         im = self.base.copy()
         d = ImageDraw.Draw(im)
-        self._caption(im, d, head, sub, alpha, bullet, misspell)
+        self._caption(im, d, head, sub, alpha, bullet, misspell, reveal, caret)
         return im.resize((self.OW, self.OH), Image.NEAREST)
 
     # -- the window itself
@@ -507,32 +527,73 @@ class Word6Chrome:
             self._art[key] = fit_wordart(text, self.f, maxw, maxh, **self.art_opts)
         return self._art[key]
 
-    def _caption(self, im, d, head, sub, alpha, bullet, misspell):
+    def _caption(self, im, d, head, sub, alpha, bullet, misspell,
+                 reveal=None, caret=None):
         if alpha <= 4:
             return
         x0, y0, x1, _ = self.document
-        art = self._art_for(head, x1 - x0 - 56, self.head_h)
+        lines = list(sub if isinstance(sub, (list, tuple)) else [sub])
+
+        if self.layout == "side":
+            # WordArt down the left, body beside it. Both are centred in the
+            # header block so a short paragraph does not sit high against a
+            # tall headline.
+            aw = int((x1 - x0) * self.head_w)
+            art = self._art_for(head, aw - 24, self.head_block - 16)
+            ax = x0 + 14 + max(0, (aw - 24 - art.size[0]) // 2)
+            ay = y0 + max(6, (self.head_block - art.size[1]) // 2)
+            tx = x0 + aw + 6
+            ty = y0 + max(8, (self.head_block
+                              - len(lines) * self.body_lead) // 2)
+        else:
+            art = self._art_for(head, x1 - x0 - 56, self.head_h)
+            ax = (x0 + x1) // 2 - art.size[0] // 2
+            ay = y0 + 6
+            tx = x0 + 22
+            ty = y0 + 10 + self.head_h
+
         if alpha < 255:
             art = art.copy()
             art.putalpha(art.getchannel("A").point(lambda v: v * alpha // 255))
-        im.paste(art, ((x0 + x1) // 2 - art.size[0] // 2, y0 + 6), art)
+        im.paste(art, (ax, ay), art)
 
         fb = self.f.get("body", self.body_size)
         ink = tuple(int(255 - (255 - c) * alpha / 255) for c in BLACK)
-        tx = x0 + 22
         wng = self.f.symbol("wingdings", self.body_size - 1)
-        ty = y0 + 10 + self.head_h
-        if bullet and wng:
+        if bullet and wng and self.layout != "side":
             d.text((tx, ty - 1), bullet, font=wng, fill=ink)
-        tx += 18 if bullet else 0
-        for ln in (sub if isinstance(sub, (list, tuple)) else [sub]):
-            d.text((tx, ty), ln, font=fb, fill=ink)
+            tx += 18
+
+        # Typing: the reveal fraction is spent over the whole paragraph, not
+        # per line, so a long first line does not race a short second one.
+        left = None
+        if reveal is not None:
+            left = int(round(sum(len(l) for l in lines)
+                             * max(0.0, min(1.0, reveal))))
+
+        for ln in lines:
+            # Clamp before slicing: a bare `ln[:left]` with a negative `left`
+            # is a slice from the END, so an untyped line renders as its own
+            # tail instead of as nothing.
+            take = len(ln) if left is None else max(0, min(len(ln), left))
+            shown = ln[:take]
+            typing_here = left is not None and 0 <= left <= len(ln)
+            if left is not None:
+                left -= len(ln)
+            if shown:
+                d.text((tx, ty), shown, font=fb, fill=ink)
+            # A word only gets its squiggle once it has been typed in full --
+            # Word does not mark a word it is still watching you write.
             for word in misspell:
-                i = ln.find(word)
+                i = shown.find(word)
                 if i >= 0:
-                    sx = tx + d.textlength(ln[:i], font=fb)
+                    sx = tx + d.textlength(shown[:i], font=fb)
                     squiggle(d, int(sx), int(sx + d.textlength(word, font=fb)),
                              ty + self.body_size + 2)
+            if caret and typing_here:
+                cx = tx + d.textlength(shown, font=fb)
+                d.rectangle([cx + 1, ty, cx + 2, ty + self.body_size], fill=BLACK)
+                caret = False
             ty += self.body_lead
 
     def _sysbox(self, d, cx0, cx1, by0, by1, w):
