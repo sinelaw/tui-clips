@@ -211,11 +211,19 @@ you would rather have ffmpeg's timing than a grab loop's.
 
 ## The pause after a key
 
-`key_settle` is 0.12s, not the 1.2s earlier versions used. The animation the
-orchestrator clip was filming lasted 180ms — seven times shorter than the pause
-that used to follow the keystroke causing it. A settle long enough to be safe
-for a screen you are photographing is long enough to hide everything worth
-filming on a screen you are not.
+`key_settle` is 0.12s where grabbing is continuous, not the 1.2s earlier
+versions used. The animation the orchestrator clip was filming lasted 180ms —
+seven times shorter than the pause that used to follow the keystroke causing
+it. A settle long enough to be safe for a screen you are photographing is long
+enough to hide everything worth filming on a screen you are not.
+
+The default follows the capture model rather than taste. Under `x11grab` there
+is no continuous grab and a `shot` is the only observation there is, so it has
+to land on a settled screen and the old 1.2s stands. **Porting a spec written
+against the old default**: its `shot` steps used to be shielded by that 1.2s.
+If one now catches a screen mid-redraw, either set `"key_settle": 1.2` for the
+whole capture or put an explicit `{"sleep": ...}` before the shot — the second
+is better, because it says which screen actually needed the wait.
 
 Where a particular step really does need longer, give it its own:
 
@@ -406,7 +414,7 @@ the dimmed bands, the captions, the outro — is identical.
     "term": "xfce4-terminal",         // or "xterm"
     "backend": "xwd",                 // or "import", or "x11grab"; see above
     "grab_fps": 30,                   // continuous grab rate; 0 grabs flat out
-    "key_settle": 0.12,               // pause after a key. NOT 1.2 -- see below
+    "key_settle": 0.12,               // pause after a key; 1.2 under x11grab
     "type_settle": 0.4,
     "locale": "C.UTF-8",              // forced, or box-drawing glyphs wrap
     "xdg": true,                      // per-pane XDG dirs under the scratch

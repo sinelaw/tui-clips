@@ -241,12 +241,23 @@ class Session:
     def __init__(self, display=":99", screen="1600x2200x24", geometry="80x24",
                  font="JetBrains Mono 21", workdir=None, settle=8.0,
                  term="xfce4-terminal", backend="xwd", grab_fps=30.0,
-                 key_settle=0.12, type_settle=0.4, locale="C.UTF-8",
+                 key_settle=None, type_settle=0.4, locale="C.UTF-8",
                  env=None):
         self.display, self.screen = display, screen
         self.geometry, self.font = geometry, font
         self.workdir = workdir or os.getcwd()
-        self.settle, self.key_settle = float(settle), float(key_settle)
+        self.settle = float(settle)
+        # The pause after a key belongs to the capture model, not to taste.
+        # Where grabbing is continuous nothing is missed between steps, so the
+        # pause only has to be long enough for the program to react -- and a
+        # long one actively hides the thing being filmed: the animation the
+        # orchestrator clip was after lasted 180ms against the old 1.2s pause.
+        # Under x11grab there is no continuous grab, a `shot` is the only
+        # observation there is, and it has to land on a settled screen, so the
+        # old default stands.
+        self.key_settle = float(
+            key_settle if key_settle is not None
+            else (1.2 if backend == "x11grab" else 0.12))
         self.type_settle = float(type_settle)
         self.term, self.backend = term, backend
         self.grab_fps = float(grab_fps)

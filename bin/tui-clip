@@ -98,10 +98,11 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
             "--term", cap.get("term", "xfce4-terminal"),
             "--backend", cap.get("backend", "xwd"),
             "--grab-fps", str(cap.get("grab_fps", 30)),
-            "--key-settle", str(cap.get("key_settle", 0.12)),
             "--type-settle", str(cap.get("type_settle", 0.4)),
             "--locale", cap.get("locale", "C.UTF-8"),
             "--keep-display"]
+    if cap.get("key_settle") is not None:
+        argv += ["--key-settle", str(cap["key_settle"])]
     if cap.get("verify"):
         argv += ["--verify", json.dumps(cap["verify"])]
     if report_path:
