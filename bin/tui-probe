@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Measure how this machine's terminal repaints, before you trust a capture.
+
+tui-clips is built around a claim that is true on some X stacks and false on
+others: that a terminal window repaints only when a client asks the server for
+its pixels, so a screenshot is not an observation of an animation but the
+clock it runs on. Where that holds, `ffmpeg -f x11grab` records almost nothing
+of self-driven motion, and any pause in the grabbing lets the program's output
+queue up so the next burst opens on a screen from a second ago.
+
+Rather than assume either answer, this runs a known animation and measures:
+
+  cost       what a frame costs through each backend
+  motion     how much of the animation an x11grab recording actually contains
+  backlog    whether stopping the grabbing makes the terminal fall behind
+
+    tui-probe --term xterm --display :97
+
+Everything it needs is built in; it films a shell loop, not your program.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+import capture  # noqa: E402
+
+# The animation: a block that marches across the screen. PERIOD is how often
+# it moves, so the number of distinct screens over any stretch is known.
+PERIOD = 0.15
+ANIM = r"""#!/bin/bash
+i=0
+printf '\033[2J'
+while :; do
+  printf '\033[H'
+  for r in $(seq 1 18); do
+    printf '\033[2K%*s\033[7m      \033[0m\n' "$(( (i % 30) + 1 ))" ""
+  done
+  i=$((i+1))
+  sleep PERIOD
+done
+"""
+
+
+def digest(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.md5(fh.read()).hexdigest()
+
+
+def bench(fn, path, n=10) -> float:
+    fn(path)                                    # warm
+    t0 = time.time()
+    for _ in range(n):
+        fn(path)
+    return (time.time() - t0) / n
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--display", default=":97")
+    ap.add_argument("--screen", default="1400x900x24")
+    ap.add_argument("--geometry", default="80x20")
+    ap.add_argument("--font", default="DejaVu Sans Mono 14")
+    ap.add_argument("--term", default="xterm", choices=capture.Session.TERMS)
+    ap.add_argument("--seconds", type=float, default=4.0)
+    args = ap.parse_args()
+
+    tmp = tempfile.mkdtemp(prefix="tui-probe-")
+    anim = os.path.join(tmp, "anim.sh")
+    with open(anim, "w") as fh:
+        fh.write(ANIM.replace("PERIOD", str(PERIOD)))
+    os.chmod(anim, 0o755)
+
+    s = capture.Session(display=args.display, screen=args.screen,
+                        geometry=args.geometry, font=args.font,
+                        term=args.term, backend="xwd", settle=3.0,
+                        workdir=tmp)
+    lines = []
+    try:
+        s.start_x()
+        s.launch([anim])
+        w, h = s.w, s.h
+        print(f"window {w}x{h} on {args.display} ({args.term})\n")
+
+        # -- cost ----------------------------------------------------------
+        xwd = capture.XwdGrabber(s.wid, args.display)
+        t_xwd = bench(xwd.grab, os.path.join(tmp, "b.xwd"))
+        row = f"  xwd     {t_xwd * 1000:7.1f} ms/frame  ({1 / t_xwd:5.1f} fps)"
+        print("cost")
+        print(row)
+        lines.append(("xwd_ms", t_xwd * 1000))
+        if shutil.which("import"):
+            imp = capture.ImportGrabber(s.wid, args.display)
+            t_imp = bench(imp.grab, os.path.join(tmp, "b.png"))
+            print(f"  import  {t_imp * 1000:7.1f} ms/frame  ({1 / t_imp:5.1f} fps)"
+                  f"   {t_imp / t_xwd:.1f}x the cost of xwd")
+            lines.append(("import_ms", t_imp * 1000))
+        else:
+            print("  import  not installed")
+
+        # -- motion: does x11grab see the animation? ------------------------
+        print("\nmotion")
+        expect = int(args.seconds / PERIOD)
+        if shutil.which("ffmpeg"):
+            d = os.path.join(tmp, "vid")
+            os.makedirs(d, exist_ok=True)
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-f", "x11grab",
+                 "-draw_mouse", "0", "-video_size", f"{w - w % 2}x{h - h % 2}",
+                 "-framerate", "30", "-i", f"{args.display}+0,0",
+                 "-t", str(args.seconds), "-fps_mode", "passthrough",
+                 os.path.join(d, "%04d.png")],
+                env={**os.environ, "DISPLAY": args.display},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            fs = sorted(os.listdir(d))
+            uniq = len({digest(os.path.join(d, f)) for f in fs})
+            print(f"  x11grab wrote {len(fs)} frames, {uniq} distinct")
+            print(f"  the animation moved about {expect} times in {args.seconds}s")
+            if uniq >= expect * 0.7:
+                print("  -> x11grab SEES the motion on this stack.")
+                print("     `\"backend\": \"x11grab\"` is a real option here.")
+            else:
+                print("  -> x11grab MISSES most of the motion on this stack.")
+                print("     This is the repaint starvation tui-clips is built")
+                print("     around. Keep the default xwd backend.")
+        else:
+            print("  ffmpeg not installed; skipped")
+
+        # -- backlog: does stopping the grabbing cost us? -------------------
+        print("\nbacklog")
+        raw = os.path.join(tmp, "g.xwd")
+
+        def burst(sec):
+            seen, t_end = [], time.time() + sec
+            while time.time() < t_end:
+                xwd.grab(raw)
+                seen.append(digest(raw))
+            uniq, last = 0, None
+            for dg in seen:
+                if dg != last:
+                    uniq += 1
+                last = dg
+            return len(seen), uniq
+
+        n1, u1 = burst(3.0)
+        steady = u1 / 3.0
+        gap = 2.5
+        time.sleep(gap)                     # nothing asks for pixels
+        t0 = time.time()
+        n2, u2 = burst(1.0)
+        after = u2 / (time.time() - t0)
+        print(f"  steady state: {steady:.1f} new screens/sec over 3s "
+              f"({n1} grabs)")
+        print(f"  after a {gap}s gap: {after:.1f} new screens/sec in the "
+              f"first second ({n2} grabs)")
+        print(f"  the animation itself moves {1 / PERIOD:.1f} times/sec")
+        if after > steady * 1.6:
+            print("  -> the terminal REPLAYS a backlog after a pause.")
+            print("     Grab continuously for the whole session; a `record`")
+            print("     must only choose what is kept, never when to grab.")
+        else:
+            print("  -> no backlog: a pause in the grabbing costs nothing here.")
+            print("     Continuous grabbing is still harmless, and is the")
+            print("     default, so a spec stays portable to stacks that need it.")
+    finally:
+        s.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

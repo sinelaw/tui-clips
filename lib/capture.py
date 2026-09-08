@@ -59,6 +59,9 @@ class Grabber:
 
     def __init__(self, wid: str, display: str):
         self.wid, self.display = wid, display
+        # The grabber runs X clients of its own, so it carries the display
+        # rather than trusting whatever DISPLAY the caller happened to export.
+        self.env = {**os.environ, "DISPLAY": display}
 
     def grab(self, path: str) -> None:
         raise NotImplementedError
@@ -86,7 +89,7 @@ class XwdGrabber(Grabber):
 
     def grab(self, path: str) -> None:
         subprocess.run(["xwd", "-silent", "-id", self.wid, "-out", path],
-                       check=True, stderr=subprocess.DEVNULL)
+                       env=self.env, check=True, stderr=subprocess.DEVNULL)
 
     def load(self, path: str) -> Image.Image:
         try:
@@ -115,7 +118,8 @@ class ImportGrabber(Grabber):
     """ImageMagick `import`: a PNG per frame, encode cost and all"""
 
     def grab(self, path: str) -> None:
-        subprocess.run(["import", "-window", self.wid, path], check=True)
+        subprocess.run(["import", "-window", self.wid, path], env=self.env,
+                       check=True, stderr=subprocess.DEVNULL)
 
 
 GRABBERS = {"xwd": XwdGrabber, "import": ImportGrabber}
