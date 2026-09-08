@@ -93,9 +93,11 @@ def main() -> None:
                          "turns the continuous grab off")
     ap.add_argument("--grab-fps", type=float, default=30.0,
                     help="target continuous grab rate; 0 grabs flat out")
-    ap.add_argument("--key-settle", type=float, default=0.12,
-                    help="pause after a key. Low by default: the animation "
-                         "being filmed is often shorter than the pause")
+    ap.add_argument("--key-settle", type=float, default=None,
+                    help="pause after a key. Defaults to 0.12 where grabbing "
+                         "is continuous (the animation being filmed is often "
+                         "shorter than the pause), and to 1.2 under x11grab, "
+                         "where a shot is the only observation there is")
     ap.add_argument("--type-settle", type=float, default=0.4)
     ap.add_argument("--locale", default="C.UTF-8",
                     help="LANG/LC_ALL for the program. A terminal decoding "
