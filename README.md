@@ -6,9 +6,10 @@ elements behind it.
 
 ## Quick start
 
-Needs `Xvfb`, `xfce4-terminal`, `xdotool`, ImageMagick (`import`), `ffmpeg`, and
-Python with Pillow. Runs headless — no X session, and nothing touches the
-terminal or editor you have open.
+Needs `Xvfb`, a terminal (`xfce4-terminal` or `xterm`), `xdotool`, `xwd`
+(from `x11-apps`), `ffmpeg`, and Python with Pillow. ImageMagick is optional —
+only the `import` backend uses it. Runs headless: no X session, and nothing
+touches the terminal or editor you have open.
 
 ```sh
 ./bin/tui-clip ~/repos/fresh/scripts/clips/fresh-markdown-compose.json
@@ -26,7 +27,9 @@ iterating:
 ```sh
 ./bin/tui-clip mine.json --stills        # capture only, check framing
 ./bin/tui-clip mine.json --skip-capture  # re-render from cached captures
+./bin/tui-clip mine.json --draft --skip-capture   # ~40s instead of ~4min
 ./bin/tui-grid out/mine/after.png --rows 50 --cols 64 --parts 2
+./bin/tui-probe                          # what this machine's terminal does
 ```
 
 `tui-grid` overlays a numbered row/column grid on a capture. Annotation bands
@@ -54,27 +57,140 @@ an overlay's pixels sit in the image at the rows the things underneath occupy �
 cut those out as they are and every one of them carries a copy of the overlay
 away with it.
 
-## Recording: when a screenshot is the wrong instrument
+## What a screenshot is for
 
-`{"shot": ...}` photographs the window with ImageMagick's `import`, which costs
-200-400ms a frame and jitters. That is fine for a screen holding still and
-useless for one that is not: anything driven by a wall clock — an animation, a
-transition, a simulation — gets sampled at four or five frames a second, at
-moments you did not choose. Film it instead.
+Three things about filming a terminal were learned by filming one, and none of
+them are guessable from the code. They are the reason the capture is shaped the
+way it is, so they come before the API that follows from them.
+
+They were also all learned on *one* stack — Xvfb with xfce4-terminal — and one
+of them turned out not to hold on the next stack we tried. So before trusting
+any of it, measure:
+
+```sh
+./bin/tui-probe --term xterm --display :97
+```
+
+`tui-probe` films a known animation and reports what a frame costs through each
+backend, how much of the animation an `x11grab` recording actually contains, and
+whether stopping the grabbing makes the terminal fall behind. Its verdicts say
+which of the sections below apply to you.
+
+### A screenshot is not an observation, it is the clock
+
+On the stack this tool was built for, the terminal window does not repaint on
+its own schedule. It repaints when an X client calls `XGetImage` on it. A
+4-second `ffmpeg -f x11grab` recording of a visibly animating TUI yielded three
+distinct images, and all three coincided with an unrelated screenshot being
+taken elsewhere. Stills four seconds apart differed by 160,000 pixels, so the
+motion was certainly real — the recording simply could not see it. It was not
+the emulator (xterm behaved the same), not the window manager (openbox did not
+help), and not load (the box was idle). `xrefresh` does force repaints but
+blanks alternate frames, so it is not usable as a shutter.
+
+Where that is true, screenshot-driven capture is not a fallback for `x11grab`
+— it is the only instrument that works, because the screenshot is what makes
+the frame exist.
+
+**It was not true on the machine this paragraph was written on.** There, Xvfb
+with xterm gave 33 distinct frames from an x11grab recording of 34 animation
+steps, and `x11grab` is a perfectly good backend. Both stacks are real, which
+is why `backend` is a spec key and `tui-probe` exists.
+
+### `xwd` is the cheap shutter
+
+Unlike the other two, this one held on both stacks we measured, because it is a
+property of the format rather than of the compositing. `xwd` writes the
+server's raw bytes instead of encoding a PNG:
+
+| window | `xwd` | ImageMagick `import` | |
+|---|---|---|---|
+| 964×580 | 7 ms | 50 ms | measured here |
+| 1540×1140 | 29 ms | 128 ms | measured here |
+| 2382×1142 | 123 ms | 295 ms | the original report |
+
+The ratio differs by stack — 2.4× there, 4–7× here — but the direction does
+not, and at the larger sizes it is the difference between sampling an animation
+at 30fps and stepping over it at 8. Run `tui-probe` for your own numbers. So `xwd` is the default backend, the dumps are decoded by a reader of
+our own (`lib/xwdfile.py`, pixel-identical to ImageMagick's decode), and
+**nothing is encoded until the sequence is over** — an encode between two frames
+lands in the middle of the motion being filmed, which is the one place it must
+not go.
+
+### The terminal replays a backlog
+
+The subtlest of the three, and the one that cost the most time. Where the first
+finding holds, what a repaint paints is not "now" — it is the next chunk of the
+program's queued output. **Stop grabbing and you fall behind**, and the next
+burst opens on a screen from a second ago.
+
+It showed up as a bug that was not there. In the orchestrator clip the dock's
+active-session highlight appeared to flicker between two rows around the nine
+second mark. It never did. Switches were landing a whole recorded run late, so
+consecutive runs disagreed about which row was active, and the eye read the
+disagreement as a bounce.
+
+So grabbing does not start or stop with a run. It runs from the first step to
+the last. Frames outside a recorded run go to a single path that is overwritten
+every time — they are not wanted as pictures, only as the asking that keeps the
+queue empty. A `record` step decides *which frames are kept*, never *whether
+grabbing happens*.
+
+This one also did not reproduce on the machine this was written on: a 2.5s gap
+with nothing asking for pixels cost nothing, and the first grab after it was
+current. Continuous grabbing is harmless where it is unnecessary, so it is the
+default either way and a spec stays portable.
+
+### Let the camera find the event
+
+Even with the queue drained, the frame a keystroke lands on moves by a few
+hundred milliseconds between takes. A 1.6s window aimed by `sleep` misses often
+enough to matter, and a window wide enough to be safe is too wide to use.
+
+So aim wide and cut afterwards. `keep` grabs a long window across the keystroke
+and then keeps N frames around the largest frame-to-frame change in it — which,
+in a window whose only event is the switch, *is* the switch:
+
+```jsonc
+{"record": "switch", "seconds": 6, "keep": 18, "anchor": "max-diff"}
+```
+
+Frames are compared as 240×120 grayscale, by mean absolute difference. The kept
+window is anchored asymmetrically — about a third of the frames before the
+event and two thirds after — because the eye needs a moment of the old screen to
+register that it *was* the old screen, and rather longer of the new one to read
+it.
+
+`anchor` picks what counts as the event. `max-diff` (the default) is right for a
+wipe and wrong for a long scroll, where the largest single change is arbitrary
+and `sustained` — the densest run of change — is what you want:
+
+| `anchor` | finds |
+|---|---|
+| `max-diff` | the largest single frame-to-frame change. A wipe, a switch, a modal opening. |
+| `sustained` | the densest run of change. A scroll, a long redraw. |
+| `first-change` | the first change within half of the largest. When the event starts the motion. |
+| `last-change` | the last such change. When the event ends it. |
+
+## Recording: what a run is
+
+`{"shot": ...}` photographs one screen. A screen that is moving needs a run:
 
 ```jsonc
 "keys": [
-  {"record": "wave", "seconds": 16, "fps": 30},   // starts ffmpeg, does NOT wait
-  {"sleep": 1},                                   // ... so this second is filmed
+  {"record": "wave", "seconds": 16, "fps": 30},   // opens a run, does NOT wait
+  {"sleep": 1},                                   // ... so this second is kept
   {"key": "F9"}                                   // ... and so is what it starts
 ]
 ```
 
-Recording does not block the key sequence, which is the point: put the
-`record` before the keystroke that starts the thing, and the clip opens on the
-screen at rest. The run ends on its own after `seconds`; the sequence waits for
-it at the end. Frames land beside the shots and a beat plays the whole run by
-naming it as a string:
+**A run does not block.** That is the whole point, and it is a genuinely
+different execution model from "record this block": the steps after the
+`record` — a sleep, the keystroke, another sleep — execute *inside* the window,
+which is the only way a keystroke and the animation it causes end up in one
+run. The sequence waits for any open run at the end.
+
+A beat plays a run by naming it as a string:
 
 ```jsonc
 {"shots": "wave", "hold": 16, "head": "...", "sub": ["...", "..."]}
@@ -82,10 +198,125 @@ naming it as a string:
 
 A `shots` **array** steps through named stills across the dwell; a `shots`
 **string** plays a recorded run straight through. Give the beat a `hold` equal
-to the recording's `seconds` and it plays at the rate it was filmed at. Frames
-are opened as needed rather than held in memory — a few seconds at 30fps is
-several gigabytes decoded, and each frame is wanted for about two output frames
-and then never again.
+to the recording's `seconds` and it plays at the rate it was filmed at — or, if
+the run was trimmed with `keep`, give it a hold long enough to read the
+trimmed frames at. Frames are opened as needed rather than held in memory: a
+few seconds at 30fps is several gigabytes decoded, and each frame is wanted for
+about two output frames and then never again.
+
+`"backend": "x11grab"` opts out of all of this and streams with ffmpeg, as
+older versions did. It turns the continuous grab off, and `keep` and the
+pointer path do not apply. Use it if `tui-probe` says your stack supports it and
+you would rather have ffmpeg's timing than a grab loop's.
+
+## The pause after a key
+
+`key_settle` is 0.12s, not the 1.2s earlier versions used. The animation the
+orchestrator clip was filming lasted 180ms — seven times shorter than the pause
+that used to follow the keystroke causing it. A settle long enough to be safe
+for a screen you are photographing is long enough to hide everything worth
+filming on a screen you are not.
+
+Where a particular step really does need longer, give it its own:
+
+```jsonc
+{"key": "Return", "settle": 0.6}
+```
+
+`type_settle` is separate and longer (0.4s): a program reacting per character
+is still catching up when the last one lands.
+
+## The mouse
+
+Some things a program will only let you do with a pointer — the width of the
+orchestrator's dock had no config key and no action, only a drag. Steps are in
+cells, like everything else in a spec:
+
+```jsonc
+{"drag": {"from_col": 38, "to_col": 24, "row": 12}},
+{"click": {"col": 4, "row": 9}},
+{"move": {"col": 20, "row": 3}},
+{"park": true}
+```
+
+A drag presses, moves in eight interpolated steps so a program tracking the
+motion is told where the pointer went, releases, and then **parks the pointer
+out of frame** — a cursor left sitting over a list leaves a hover highlight on
+whatever row it landed on, and the clip then shows a selection nobody made.
+
+X keeps the cursor out of a window grab, so it is not in the captured pixels at
+all and a drag otherwise reads as a panel resizing itself for no reason. The
+capture writes the path it walked into the run's `frames.json`, and the
+renderer draws the pointer from it — interpolated to the output frame rate and
+eased across each gesture rather than sampled, with a bump on the press.
+`"cursor": false` in `render` turns it off; `{"size": 1.25}` sets its height in
+terminal rows.
+
+## Did the take work?
+
+Worth answering before four minutes of rendering, not after. `capture.verify`
+names rects in cells; every frame of every run is measured, and the report says
+which one was brightest:
+
+```jsonc
+"verify": {
+  "regions": {"s0": [0,0,20,1], "s1": [0,1,20,2], "s2": [0,2,20,3]},
+  "expect_changes": 1,
+  "monotonic": true
+}
+```
+
+For the orchestrator clip the question was "which dock row is brightest in each
+frame of each run", and the answer had to step exactly once per switch beat and
+never step back. `monotonic` checks it never steps back; `expect_changes` checks
+it stepped as often as it should have. `tui-clip` prints the report after each
+take and flags a run that failed, alongside the frame count, the achieved fps
+and the per-frame change magnitudes.
+
+## Drafts
+
+```sh
+./bin/tui-clip mine.json --draft --skip-capture
+```
+
+Half size, 30fps, and `{"crf": 30, "preset": "ultrafast"}`, rendered against
+the frames you already captured. On the clip this was developed against it is
+5 seconds where the full render is 28; the original report measured 40 seconds
+against 3m44s on a longer one. Either way the ratio is what matters, and every
+framing decision — what a note points at, whether a pane is wide enough,
+whether two things collide — is legible at half size.
+
+Every pixel constant comes down with the canvas, so a draft is a faithful
+miniature rather than a full-size caption bar over a shrunken picture. The size
+is derived rather than left to you: libx264 refuses a dimension that is not
+divisible by two, and a chrome draws at 1/`scale` of the canvas and needs that
+to divide as well. A chrome draft reduces the upscale instead of the layout, so
+the window's own type keeps its proportion to its furniture.
+
+## Staging a clip
+
+A clip should not be able to see, or write to, anything real. Each pane gets
+its own XDG directories under the clip's scratch — `XDG_DATA_HOME`,
+`XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` — so a
+program that keeps history or sessions starts from the same nothing every time
+rather than showing a different screen on the second take. `"xdg": false` opts
+out; anything in `capture.env` overrides.
+
+`copy_dirs` stages what the clip *should* see: a config, a set of plugins, a
+`bin/` of fake tools that answer instantly and identically. Together they are
+the supported way to dress a clip without touching a real install.
+
+`LANG` and `LC_ALL` are forced to `C.UTF-8`. A terminal that decodes
+box-drawing glyphs as latin-1 renders every one as about three columns and
+wraps every line that has any; the failure is silent and looks exactly like a
+layout bug in the program you are filming. `"locale"` overrides it.
+
+**Set the scene through the program's own API, not through its UI.** Cutting
+four git worktrees through the orchestrator's dialogs would have been about
+forty keystrokes, forty chances to desync, and not one of them the thing the
+clip was about. Doing it through the program's plugin/scripting interface — one
+call each — was decisively better. Drive the setup however the program will let
+you script it, and film only the thing the clip is about.
 
 ## Typing
 
@@ -172,8 +403,20 @@ the dimmed bands, the captions, the outro — is identical.
     "screen": "1600x2200x24",         // must exceed the terminal window
     "display": ":99",
     "settle": 8,                      // seconds to wait for the first paint
+    "term": "xfce4-terminal",         // or "xterm"
+    "backend": "xwd",                 // or "import", or "x11grab"; see above
+    "grab_fps": 30,                   // continuous grab rate; 0 grabs flat out
+    "key_settle": 0.12,               // pause after a key. NOT 1.2 -- see below
+    "type_settle": 0.4,
+    "locale": "C.UTF-8",              // forced, or box-drawing glyphs wrap
+    "xdg": true,                      // per-pane XDG dirs under the scratch
     "copy_files": ["~/repo/FILE.md",  // copied into a scratch working dir
                    {"src": "~/repo/docs/index.md", "as": "configuration.md"}],
+    "copy_dirs": {"~/repo/clip-config": "{scratch}/config"},
+    "verify": {                       // did the take work? see above
+      "regions": {"s0": [0, 0, 20, 1], "s1": [0, 1, 20, 2]},
+      "monotonic": true
+    },
     "env": {                          // {scratch} {proj} {pane} expand
       "XDG_DATA_HOME": "{scratch}/data-{pane}",
       "XDG_RUNTIME_DIR": "{scratch}/run"
@@ -181,8 +424,12 @@ the dimmed bands, the captions, the outro — is identical.
     "keys": [                         // driven into every pane, in order
       {"key": "ctrl+p"},
       {"type": "toggle compose"},
-      {"key": "Return"},
+      {"key": "Return", "settle": 0.6},   // this one needs longer
       {"shot": "rest"},               // a named screen a beat can be drawn on
+      {"drag": {"from_col": 38, "to_col": 24, "row": 12}},
+      {"record": "switch", "seconds": 6,  // opens a run; does NOT wait
+       "keep": 18, "anchor": "max-diff"},
+      {"sleep": 1},                   // ... filmed by the run above
       {"key": "Next"}
     ],
     "panes": {                        // {before, after} to compare, else one
@@ -200,6 +447,7 @@ the dimmed bands, the captions, the outro — is identical.
     "chrome": {"style": "word6", "assets": "~/assets"},  // optional; see below
     "labels": {"before": "BEFORE", "after": "AFTER", "solo": "NEW"},
     "note_size": 54,                          // the callout text, in px
+    "cursor": {"size": 1.25},                 // the drawn pointer; false to hide
     "title_card": {                           // a card before the clip
       "lines": [{"text": "Horrible Code", "effect": "sick", "at": 0.04},
                 {"text": "to", "small": true, "at": 0.34},
@@ -308,6 +556,14 @@ panel keeps the crisp border it is drawn with. `VIG_X`, `VIG_Y` and
 
 ## Notes: saying it beside the thing
 
+**Say it in the frame, not in a bar under it.** A caption bar across the foot
+of the video is read last or not at all. A beat with a `note` — a named rect
+framed, everything else dimmed, three or four words on a plate with a leader
+line back to the frame — is read first, because the picture is doing the
+explaining. "agent is running", "switch between sessions", "diff and full IDE"
+beat any sentence anyone wrote for the bar. Treat the note as the default and
+the caption bar as the exception.
+
 A caption bar has room for a sentence, and a sentence is the wrong length for
 pointing at one expression. `"note"` puts a few words in the frame instead:
 dealt off the rect's corner so they cover nothing, on a plate so they do not
@@ -327,10 +583,17 @@ set as text: they are bitmaps, cut at exactly one size, so they are rendered at
 not and the words still do.
 
 A beat with a note usually wants `head` alone in the bar -- which file, which
-screen -- and no `sub` at all. Both are optional now, and when *no* beat has
+screen -- and no `sub` at all. Both are optional, and when *no* beat has
 either, the bar is not drawn: the viewport takes its height, and the intro and
 outro captions float over the ground the vignette has already darkened. A strip
 of empty chrome across the bottom of every frame is worse than no strip.
+
+A note is independent of `band`. It used to be drawn with the band, so a beat
+that set `"band": false` -- which is what a beat whose point is pure motion
+does -- silently lost its note along with the dimming, and the words had to go
+on the beats either side, describing the movement before and after the frames
+that showed it. The two are now separate: `band` controls the dimming and the
+frame, and a note is drawn whenever the beat has one.
 
 `render.note_size` is the text size in pixels, 30 by default. Two words at 54
 carry across a phone; a sentence at 30 does not. The room the fit reserves
