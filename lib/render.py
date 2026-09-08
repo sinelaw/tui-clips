@@ -33,20 +33,41 @@ font or geometry change.
 from __future__ import annotations
 
 import glob
+import json
 import math
 import os
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 import chrome_word6
 
-BOLD = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
+def _font(*names: str) -> str | None:
+    """the first of `names` that this machine actually has.
+
+    Distributions do not agree on where a font file lives -- /usr/share/fonts/
+    TTF on Arch, /usr/share/fonts/truetype/<family> on Debian -- so the family
+    is searched for rather than spelled out, and the alternatives are listed
+    in preference order.
+    """
+    for n in names:
+        hit = sorted(glob.glob(f"/usr/share/fonts/**/{n}", recursive=True))
+        if hit:
+            return hit[0]
+    return None
+
+
+BOLD = _font("DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf",
+             "FreeSansBold.ttf")
 # Colour emoji are bitmaps, and Noto's are cut at exactly one size: asking
 # FreeType for any other raises. So they are drawn at 109 and scaled, which is
 # also why they cannot simply be a second font in a text run.
-EMOJI = next(iter(sorted(glob.glob(
-    "/usr/share/fonts/**/NotoColorEmoji*.ttf", recursive=True))), None)
+EMOJI = _font("NotoColorEmoji*.ttf")
 EMOJI_PX = 109
-MONO = "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"
+MONO = _font("JetBrainsMono-Regular.ttf", "DejaVuSansMono.ttf",
+             "LiberationMono-Regular.ttf")
+if not BOLD or not MONO:
+    raise SystemExit(
+        "no usable fonts: tui-clips wants a bold sans (DejaVu Sans Bold) and "
+        "a mono (JetBrains Mono, or DejaVu Sans Mono) under /usr/share/fonts")
 
 DEFAULT_THEME = {
     "bg": [10, 10, 12],
@@ -164,6 +185,12 @@ class Renderer:
         # wanted for about two output frames and then never again.
         self.runs = dict(runs or {})
         self._runcache: dict = {}
+        # A run's sidecar carries what is not in its pixels: when each kept
+        # frame was taken, and where the pointer was at the time.
+        self.paths = {nm: load_path(os.path.dirname(fs[0]))
+                      for nm, fs in self.runs.items() if fs}
+        cur = r.get("cursor", True)
+        self.cursor_cfg = ({} if cur is True else dict(cur)) if cur else None
         for nm, frames in self.runs.items():
             probe = Image.open(frames[0])
             if probe.size != self.A.size:
@@ -179,8 +206,16 @@ class Renderer:
 
         self.W, self.H = r.get("size", [1080, 1080])
         self.fps = int(r.get("fps", 60))
-        self.header_h = int(r.get("header_height", 100))
-        self.cap_h = int(r.get("caption_height", 130))
+        # A draft is the same picture at a fraction of the size, so every
+        # pixel constant has to come down with it. Left at 1.0 a render is
+        # unchanged; `tui-clip --draft` sets it alongside a halved `size`.
+        # Without it a draft shows notes and captions at twice their finished
+        # size, and the framing decisions a draft exists to check -- what a
+        # note points at, whether a pane is wide enough -- are exactly the
+        # ones it would get wrong.
+        self.dk = float(r.get("draft_scale", 1.0))
+        self.header_h = self.k(r.get("header_height", 100))
+        self.cap_h = self.k(r.get("caption_height", 130))
         # The bar exists for the beats. A clip whose beats all say their piece
         # in the frame has nothing to put in it, and a strip of empty chrome
         # across the bottom is worse than no strip: the intro and outro
@@ -266,7 +301,7 @@ class Renderer:
                              else self.th[self.ann[0].get("tone", "after")])
 
         # intro panel geometry, derived so it always fits the canvas
-        label_h, gutter, margin = 44, 24, 16
+        label_h, gutter, margin = self.k(44), self.k(24), self.k(16)
         if self.chrome:
             # No room for a label above the panel: the establishing shot is the
             # document's own page, so the capture opens small inside it.
@@ -274,7 +309,7 @@ class Renderer:
             avail_h, avail_w = self.vp[3], self.vp[2]
         else:
             self.panel_y = self.header_h + label_h
-            avail_h = self.cap_y - self.panel_y - 6
+            avail_h = self.cap_y - self.panel_y - self.k(6)
             avail_w = ((self.W - 2 * margin - gutter) / 2 if self.mode == "compare"
                        else self.W - 2 * margin)
         self.s_a = min(avail_w / self.IW, avail_h / self.IH)
@@ -289,16 +324,22 @@ class Renderer:
                        else (self.W - self.panel_w) / 2)
         self.s_c = self.vp[2] / self.IW
 
-        self.f_label = ImageFont.truetype(BOLD, 40)
-        self.f_meta = ImageFont.truetype(MONO, 24)
-        self.f_hdr = ImageFont.truetype(BOLD, 38)
-        self.f_cap = ImageFont.truetype(BOLD, 40)
-        self.f_sub = ImageFont.truetype(MONO, 23)
-        self.f_note = ImageFont.truetype(BOLD, int(r.get("note_size", 30)))
+        self.f_label = ImageFont.truetype(BOLD, self.k(40))
+        self.f_meta = ImageFont.truetype(MONO, self.k(24))
+        self.f_hdr = ImageFont.truetype(BOLD, self.k(38))
+        self.f_cap = ImageFont.truetype(BOLD, self.k(40))
+        self.f_sub = ImageFont.truetype(MONO, self.k(23))
+        self.f_note = ImageFont.truetype(BOLD, self.k(r.get("note_size", 30)))
 
         self._cache: dict = {}
 
     # -- geometry helpers ---------------------------------------------------
+    def k(self, v: float) -> int:
+        """`v` output pixels, brought down for a draft render"""
+        if self.dk == 1.0:
+            return int(v)
+        return max(1, int(round(v * self.dk))) if v >= 1 else int(round(v * self.dk))
+
     def hold(self, i: int) -> float:
         """beat i's dwell -- its own `hold`, else the clip's"""
         return float(self.ann[i].get("hold", self.t["hold"]))
@@ -469,10 +510,71 @@ class Renderer:
             base = Image.blend(base, self.scaled(sh[2], s, sh[3]), sh[4])
         return base
 
+    # The pointer, in units of its own height: the classic arrow. Drawn
+    # rather than screenshotted because X keeps the cursor out of a window
+    # grab, so there is nothing to screenshot.
+    ARROW = ((0.00, 0.00), (0.00, 0.72), (0.19, 0.55), (0.31, 0.84),
+             (0.44, 0.79), (0.32, 0.51), (0.53, 0.50))
+
+    def arrow(self, h: int):
+        """the cursor, `h` pixels tall, antialiased"""
+        key = ("arrow", h)
+        if key not in self._cache:
+            ss = 4                      # supersample; the edges are diagonal
+            w = int(h * 0.62) + 4
+            im = Image.new("RGBA", ((w + 2) * ss, (h + 2) * ss), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            pts = [((x * h + 1) * ss, (y * h + 1) * ss) for x, y in self.ARROW]
+            # White with a thin dark edge, so it reads on a dark terminal and
+            # on a light one. The edge has to stay thin: the arrow's tail is
+            # only a few pixels across, and a heavy stroke closes it up into a
+            # black blob that no longer looks like a pointer.
+            dr.polygon(pts, fill=(255, 255, 255, 255),
+                       outline=(16, 16, 20, 255),
+                       width=max(1, int(h * 0.055)) * ss)
+            if len(self._cache) > 24:
+                self._cache.clear()
+            self._cache[key] = im.resize((w + 2, h + 2), Image.LANCZOS)
+        return self._cache[key]
+
+    def cursor(self, nov, name: str, k: int, px: float, py: float, s: float,
+               alpha: int) -> None:
+        """draw the pointer over frame `k` of run `name`, if it had one"""
+        if self.cursor_cfg is None or alpha <= 4:
+            return
+        path = self.paths.get(name) or {}
+        ts, ptr = path.get("t"), path.get("pointer")
+        if not ts or ptr is None or k >= len(ts):
+            return
+        at = ptr.at(ts[k])
+        if at is None:
+            return
+        x, y, bump = at
+        # The cursor scales with the zoom: it is part of the picture, not an
+        # overlay on it, and one that stayed the same size while the screen
+        # grew would read as a sticker on the lens.
+        h = max(8, int(self.RH * float(self.cursor_cfg.get("size", 1.25)) * s
+                       * (1.0 + 0.35 * bump)))
+        a = self.arrow(h)
+        if alpha < 255:
+            a = a.copy()
+            a.putalpha(a.getchannel("A").point(lambda v: int(v * alpha / 255)))
+        nov.alpha_composite(a, (int(round(px + x * s)), int(round(py + y * s))))
+
+    def run_at(self, i: int, hp: float):
+        """-> (run name, frame index) if beat i is playing a recording"""
+        a = self.ann[i]
+        run = a.get("shots")
+        if not isinstance(run, str):
+            return None
+        n = len(self.runs[run])
+        return run, min(int(min(hp, 0.999999) * n), n - 1)
+
     def band(self, i: int, px: float, py: float, s: float):
         x0, y0, x1, y1 = self.rect(i)
-        return (px + x0 * s - 6, py + y0 * s - 6,
-                px + x1 * s + 6, py + y1 * s + 6)
+        g = self.k(6)
+        return (px + x0 * s - g, py + y0 * s - g,
+                px + x1 * s + g, py + y1 * s + g)
 
     # A callout's parts, in pixels: the clearance between the rect and the
     # text, how far along the rect the text is dealt so the leader has a
@@ -531,9 +633,11 @@ class Renderer:
 
         # where the leader lands on the rect: in from the corner nearest the
         # note, so the last segment runs alongside the rows it points at
-        px = min(x1 - 10, max(x0 + 10, x1 - 48 if right else x0 + 48))
+        inset, corner = self.k(10), self.k(48)
+        px = min(x1 - inset, max(x0 + inset,
+                                 x1 - corner if right else x0 + corner))
 
-        pd = self.NOTE_PAD
+        pd = self.k(self.NOTE_PAD)
         emo_ch, note = self.split_note(note)
         asc, desc = self.f_note.getmetrics()
         th_ = asc + desc
@@ -541,22 +645,25 @@ class Renderer:
         tw = ld.textlength(note, font=self.f_note)
         emo_w = (emo.width + int(pd * 0.8)) if emo else 0
         tw += emo_w
-        rx = px + (self.NOTE_SIDE if right else -self.NOTE_SIDE)
-        tx = rx + 20 if right else rx - 20 - tw
+        side, lead = self.k(self.NOTE_SIDE), self.k(20)
+        rx = px + (side if right else -side)
+        tx = rx + lead if right else rx - lead - tw
         # keep the words on the canvas; the leader stretches instead
-        tx = min(cw - 40 - pd - tw, max(40.0 + pd, tx))
-        rx = tx - 20 if right else tx + tw + 20
+        edge = self.k(40)
+        tx = min(cw - edge - pd - tw, max(float(edge) + pd, tx))
+        rx = tx - lead if right else tx + tw + lead
         # A static camera frames a whole function, so a beat near its foot has
         # no room under it. Flip rather than run off the frame: the note is
         # for reading, and half a note below the edge is none.
+        gap = self.k(self.NOTE_GAP)
         def place(down):
-            t0 = (y1 + self.NOTE_GAP) if down else (y0 - self.NOTE_GAP - th_)
+            t0 = (y1 + gap) if down else (y0 - gap - th_)
             return t0, t0 + th_
         ty0, ty1 = place(below)
-        if below and ty1 + pd > ch - 20:
+        if below and ty1 + pd > ch - lead:
             below = False
             ty0, ty1 = place(False)
-        elif not below and ty0 - pd < 20:
+        elif not below and ty0 - pd < lead:
             below = True
             ty0, ty1 = place(True)
         py = y1 if below else y0
@@ -567,14 +674,17 @@ class Renderer:
         # more line of the program rather than as something said about it.
         ld.rounded_rectangle(
             [min(tx, rx) - pd, ty0 - pd, max(tx + tw, rx) + pd, ty1 + pd],
-            radius=8, fill=(*self.th["caption_bg"], min(alpha, 242)))
-        ld.rectangle([rx - self.NOTE_RULE / 2, ty0 - pd,
-                      rx + self.NOTE_RULE / 2, ty1 + pd], fill=col)
+            radius=self.k(8), fill=(*self.th["caption_bg"], min(alpha, 242)))
+        rule = self.k(self.NOTE_RULE)
+        ld.rectangle([rx - rule / 2, ty0 - pd,
+                      rx + rule / 2, ty1 + pd], fill=col)
         # the leader: out of the rule's near end, along, and back to the rect
         near = ty0 - pd if below else ty1 + pd
         mid = (near + py) / 2
-        ld.line([(rx, near), (rx, mid), (px, mid), (px, py)], fill=col, width=4)
-        ld.rectangle([px - 6, py - 6, px + 6, py + 6], fill=col)
+        ld.line([(rx, near), (rx, mid), (px, mid), (px, py)], fill=col,
+                width=self.k(4))
+        dot = self.k(6)
+        ld.rectangle([px - dot, py - dot, px + dot, py + dot], fill=col)
         if emo:
             e = emo.copy()
             e.putalpha(e.getchannel("A").point(lambda v: int(v * alpha / 255)))
@@ -674,13 +784,33 @@ class Renderer:
             m = m.point(lambda k: int(255 - (255 - k) * strength))
         return Image.composite(lay, edge, m)
 
+    def size_at(self, s: float) -> tuple[int, int]:
+        """the capture's pixel size at scale `s`.
+
+        The scale is quantised *before* the size is taken off it, not after,
+        because the two have to come from the same number. Keying the cache on
+        `round(s, 4)` while sizing from the raw `s` lets two scales a
+        ten-thousandth apart share a key and hold images a pixel apart in
+        size, and the failure surfaces nowhere near here -- it surfaces later
+        as `ValueError: images do not match` when one of them is blended with
+        the other, on a clip that renders fine at 29 rows and dies at 30.
+
+        Half away from zero rather than Python's half-to-even, so a height
+        landing exactly on .5 does not round one way or the other depending on
+        the parity of the integer beside it.
+        """
+        q = round(float(s), 4)
+        return (int(math.floor(self.IW * q + 0.5)),
+                int(math.floor(self.IH * q + 0.5)))
+
     def scaled(self, img, s: float, tag: str):
-        key = (tag, round(s, 4))
+        w, h = self.size_at(s)
+        # keyed on the size it produced, so a hit can only ever be that size
+        key = (tag, w, h)
         if key not in self._cache:
             if len(self._cache) > 16:
                 self._cache.clear()
-            self._cache[key] = img.resize(
-                (int(round(self.IW * s)), int(round(self.IH * s))), Image.LANCZOS)
+            self._cache[key] = img.resize((w, h), Image.LANCZOS)
         return self._cache[key]
 
     # -- main ---------------------------------------------------------------
@@ -927,7 +1057,7 @@ class Renderer:
 
         # BEFORE panel, sliding out to the left (comparison clips only)
         if self.B is not None and p < 1.0:
-            bx = int(round(lerp(self.bx, -self.panel_w - 100, p)))
+            bx = int(round(lerp(self.bx, -self.panel_w - self.k(100), p)))
             pw, ph = int(round(self.panel_w)), int(round(self.panel_h))
             lay = Image.new("RGB", (pw, ph), th["bg"])
             lay.paste(self.scaled(self.B, self.s_a, "B"),
@@ -935,7 +1065,7 @@ class Renderer:
                        int(round(ph / 2 - self.IH / 2 * self.s_a))))
             cv.paste(lay, (bx, int(self.panel_y)))
             d.rectangle([bx, self.panel_y, bx + pw - 1, self.panel_y + ph - 1],
-                        outline=th["panel_border"], width=2)
+                        outline=th["panel_border"], width=self.k(2))
 
         # subject panel, growing from the intro shot to the full viewport
         cwi, chi = int(round(cw)), int(round(ch))
@@ -963,6 +1093,23 @@ class Renderer:
                     base = Image.blend(base, nb, pan)
             lay.paste(base, (px, py))
 
+        # The pointer goes on the screen, under the annotation layer: it is
+        # part of what was filmed, so the dim that falls on the screen falls
+        # on it too.
+        if self.cursor_cfg is not None and not push:
+            cov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
+            drew = False
+            for k, alpha in ((ai, int(255 * (1.0 - pan))), (nxt, int(255 * pan))):
+                at = self.run_at(k, 1.0 if (pan > 0 and k == ai) else
+                                 (0.0 if pan > 0 else hp))
+                if at:
+                    self.cursor(cov, at[0], at[1], px, py, s, alpha)
+                    drew = True
+            if drew:
+                lay = lay.convert("RGBA")
+                lay.alpha_composite(cov)
+                lay = lay.convert("RGB")
+
         # A beat with `band: false` is the screen alone -- nothing dimmed and
         # no frame drawn -- for a run of shots whose own movement is the point.
         # A rectangle with an accent tick drawn over a document page reads as a
@@ -971,37 +1118,49 @@ class Renderer:
         band_default = not self.chrome
         lit = lerp(0.0 if not self.ann[ai].get("band", band_default) else 1.0,
                    0.0 if not self.ann[nxt].get("band", band_default) else 1.0, pan)
-        if push:
-            # nothing is drawn over a screen that is on its way out
-            lit = 0.0
-        dim = int(150 * min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel) * lit)
+        # How far into the clip the annotation layer is up at all: past the
+        # zoom, not yet into the outro, and never over a screen on its way out
+        # of a push. The band's dimming is this times `lit`; the note is this
+        # on its own. They used to be the same number, which meant a beat that
+        # turned the band off to let pure motion speak lost its note with it,
+        # and the words had to go on the beats either side -- describing the
+        # movement before and after the frames that showed it.
+        vis = 0.0 if push else (min(1.0, max(0.0, (p - 0.55) / 0.45))
+                                * (1.0 - rel))
+        tone_i = self.th[self.ann[ai].get("tone", "after")]
+        tone_j = self.th[self.ann[nxt].get("tone", "after")]
+        b = self.band(ai, px, py, s)
+        b_next = self.band(nxt, px, py, s) if pan > 0 else b
+        b_mix = (tuple(lerp(b[k], b_next[k], pan) for k in range(4))
+                 if pan > 0 else b)
+
+        dim = int(150 * vis * lit)
         if dim > 3:
-            b = self.band(ai, px, py, s)
-            if pan > 0:
-                b2 = self.band(nxt, px, py, s)
-                b = tuple(lerp(b[k], b2[k], pan) for k in range(4))
             ov = Image.new("RGBA", lay.size, (0, 0, 0, dim))
-            ImageDraw.Draw(ov).rounded_rectangle(list(b), radius=10, fill=(0, 0, 0, 0))
+            ImageDraw.Draw(ov).rounded_rectangle(list(b_mix), radius=self.k(10),
+                                                 fill=(0, 0, 0, 0))
             lay = lay.convert("RGBA")
             lay.alpha_composite(ov)
             lay = lay.convert("RGB")
             ld = ImageDraw.Draw(lay)
-            tone_i = self.th[self.ann[ai].get("tone", "after")]
-            tone_j = self.th[self.ann[nxt].get("tone", "after")]
             g = fade_c(tuple(int(lerp(tone_i[k], tone_j[k], pan)) for k in range(3)),
-                     int(255 * (1.0 - rel) * lit))
-            ld.rounded_rectangle(list(b), radius=10, outline=g, width=3)
-            ld.rectangle([b[0] - 12, b[1], b[0] - 7, b[3]], fill=g)
+                     int(255 * vis * lit))
+            ld.rounded_rectangle(list(b_mix), radius=self.k(10), outline=g,
+                                 width=self.k(3))
+            ld.rectangle([b_mix[0] - self.k(12), b_mix[1],
+                          b_mix[0] - self.k(7), b_mix[3]], fill=g)
 
-            # Notes go on their own RGBA pass: a plate that fades has to be
-            # composited, not drawn, and the outgoing note has to cross the
-            # incoming one rather than overwrite it.
+        # Notes go on their own RGBA pass: a plate that fades has to be
+        # composited, not drawn, and the outgoing note has to cross the
+        # incoming one rather than overwrite it. The pass runs whether or not
+        # the band was drawn -- the note is anchored to the beat's rect, which
+        # exists either way.
+        if vis > 0.015:
             nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-            fade_out = int(255 * (1.0 - rel) * lit * (1.0 - pan))
-            self.callout(nov, ai, b, fade_out, tone_i, lay.size)
+            self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
+                         lay.size)
             if pan > 0:
-                self.callout(nov, nxt, self.band(nxt, px, py, s),
-                             int(255 * (1.0 - rel) * lit * pan), tone_j,
+                self.callout(nov, nxt, b_next, int(255 * vis * pan), tone_j,
                              lay.size)
             lay = lay.convert("RGBA")
             lay.alpha_composite(nov)
@@ -1013,35 +1172,37 @@ class Renderer:
         cv.paste(lay, pos)
         if p < 0.9 and not self.vignette and not self.chrome:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
-                        outline=th["panel_border"], width=2)
+                        outline=th["panel_border"], width=self.k(2))
         if self.chrome:
             return cv
 
         # header: intro labels cross-fade into a single banner
-        d.rectangle([0, 0, W, self.panel_y - 44 if p < 0.5 else self.vp[1]],
-                    fill=th["bg"])
+        d.rectangle([0, 0, W, self.panel_y - self.k(44) if p < 0.5
+                     else self.vp[1]], fill=th["bg"])
         a_in = int(255 * max(0.0, min(1.0, (p - 0.45) / 0.40)))
         a_out = 255 - a_in
         if a_out > 4:
-            d.text((W / 2, 40), self.title, font=self.f_meta,
+            d.text((W / 2, self.k(40)), self.title, font=self.f_meta,
                    fill=fade_c(th["muted"], a_out), anchor="mm")
             if self.B is not None:
-                d.text((self.bx + self.panel_w / 2, 108), self.labels["before"],
+                d.text((self.bx + self.panel_w / 2, self.k(108)),
+                       self.labels["before"],
                        font=self.f_label, fill=fade_c(th["before"], a_out), anchor="mm")
             intro_lead = self.ann[0].get("label", self.lead)
             if intro_lead:
-                d.text((self.ax + self.panel_w / 2, 108), intro_lead,
+                d.text((self.ax + self.panel_w / 2, self.k(108)), intro_lead,
                        font=self.f_label, fill=fade_c(self.accent_intro, a_out),
                        anchor="mm")
         if a_in > 4:
             lead, tone = self.banner(ai, nxt, pan)
             if lead:
-                d.text((32, 50), lead, font=self.f_hdr,
+                d.text((self.k(32), self.k(50)), lead, font=self.f_hdr,
                        fill=fade_c(tone, a_in), anchor="lm")
-                d.text((W - 32, 52), self.title, font=self.f_meta,
+                d.text((W - self.k(32), self.k(52)), self.title,
+                       font=self.f_meta,
                        fill=fade_c(th["muted"], a_in), anchor="rm")
             else:
-                d.text((32, 50), self.title, font=self.f_meta,
+                d.text((self.k(32), self.k(50)), self.title, font=self.f_meta,
                        fill=fade_c(th["muted"], a_in), anchor="lm")
 
         # caption bar -- or, with no bar, the line it would have held
@@ -1053,17 +1214,18 @@ class Renderer:
         accent = (self.accent_intro if p < 0.5 else
                   self.th[self.ann[nxt if pan >= 0.5 else ai].get("tone", "after")])
         if self.bar:
-            d.rectangle([0, self.cap_y, W, self.cap_y + 3],
+            d.rectangle([0, self.cap_y, W, self.cap_y + self.k(3)],
                         fill=fade_c(accent, 200))
 
         # No tick without words beside it. A clip that says its piece in the
         # frame leaves this bar empty, and an accent mark alone in an empty bar
         # is a label for nothing.
         if head or sub:
-            d.rectangle([32, ty + 44, 40, ty + 84], fill=fade_c(accent, ca))
-        d.text((60, ty + 50), head, font=self.f_cap,
+            d.rectangle([self.k(32), ty + self.k(44), self.k(40),
+                         ty + self.k(84)], fill=fade_c(accent, ca))
+        d.text((self.k(60), ty + self.k(50)), head, font=self.f_cap,
                fill=fade_c(th["fg"], ca), anchor="lm")
-        d.text((60, ty + 92), sub, font=self.f_sub,
+        d.text((self.k(60), ty + self.k(92)), sub, font=self.f_sub,
                fill=fade_c(th["muted"], ca), anchor="lm")
         return cv
 
@@ -1083,6 +1245,104 @@ SURVEY_CONTEXT = 1.05
 GHOST_GONE = 0.04
 # how far an uninvolved piece recedes while a sibling is being taken apart
 ASIDE = 0.09
+
+
+# ---------------------------------------------------------------------------
+# the pointer
+# ---------------------------------------------------------------------------
+
+# How long a gap in the samples ends one gesture and starts another, and how
+# long the click bump takes to settle.
+GESTURE_GAP = 0.4
+CLICK_BUMP = 0.22
+
+
+class Pointer:
+    """where the mouse was, eased to the output frame rate.
+
+    X does not draw the cursor into a window grab, so it is not in the
+    captured pixels at all -- a drag arrives as a panel resizing itself for no
+    visible reason. What the capture does record is the path it walked, and
+    that is eight jumps for a drag, because eight is how many the program had
+    to be told about. Played back one sample per frame it reads as eight
+    teleports, so the samples of one gesture are treated as a single travel
+    and the position is taken along its arc with an ease -- which is what a
+    hand does, and what the eight jumps were standing in for.
+    """
+
+    def __init__(self, samples: list[dict]):
+        self.s = [dict(p) for p in samples]
+        self.gestures = []
+        self.clicks = [b["t"] for a, b in zip(self.s, self.s[1:])
+                       if b["down"] and not a["down"]]
+        if self.s and self.s[0]["down"]:
+            self.clicks.insert(0, self.s[0]["t"])
+        run: list[dict] = []
+        for p in self.s:
+            if run and (p["t"] - run[-1]["t"] > GESTURE_GAP
+                        or p["visible"] != run[-1]["visible"]):
+                self.gestures.append(run)
+                run = []
+            run.append(p)
+        if run:
+            self.gestures.append(run)
+
+    @staticmethod
+    def _along(pts, frac):
+        """the point `frac` of the way along a polyline, by arc length"""
+        segs = [math.dist((a["x"], a["y"]), (b["x"], b["y"]))
+                for a, b in zip(pts, pts[1:])]
+        total = sum(segs)
+        if total <= 0:
+            return pts[-1]["x"], pts[-1]["y"]
+        want, run = frac * total, 0.0
+        for (a, b), L in zip(zip(pts, pts[1:]), segs):
+            if run + L >= want:
+                u = (want - run) / L if L else 0.0
+                return lerp(a["x"], b["x"], u), lerp(a["y"], b["y"], u)
+            run += L
+        return pts[-1]["x"], pts[-1]["y"]
+
+    def at(self, t: float):
+        """-> (x, y, bump) in capture pixels, or None if there is no pointer.
+
+        None before the first sample -- the pointer is wherever X happened to
+        leave it, and drawing it there would invent a mouse the clip never
+        moved -- and None once a step has parked it out of frame.
+        """
+        if not self.s or t < self.s[0]["t"]:
+            return None
+        g = None
+        for cand in self.gestures:
+            if cand[0]["t"] <= t:
+                g = cand
+            else:
+                break
+        if g is None or not g[-1]["visible"]:
+            return None
+        t0, t1 = g[0]["t"], g[-1]["t"]
+        if t <= t0 or t1 <= t0:
+            x, y = g[0]["x"], g[0]["y"]
+        elif t >= t1:
+            x, y = g[-1]["x"], g[-1]["y"]
+        else:
+            x, y = self._along(g, ease((t - t0) / (t1 - t0)))
+        bump = 0.0
+        for ct in self.clicks:
+            if 0 <= t - ct < CLICK_BUMP:
+                bump = max(bump, 1.0 - (t - ct) / CLICK_BUMP)
+        return x, y, bump
+
+
+def load_path(run_dir: str) -> dict:
+    """a recorded run's timing and pointer path, if the capture left one"""
+    f = os.path.join(run_dir, "frames.json")
+    if not os.path.exists(f):
+        return {}
+    with open(f) as fh:
+        d = json.load(fh)
+    return {"t": [fr["t"] for fr in d.get("frames", [])],
+            "pointer": Pointer(d.get("pointer", []))}
 
 
 def _union(rects):

@@ -1,179 +1,196 @@
-#!/usr/bin/env bash
-# Screenshot a terminal program running on a headless X display.
-#
-# The program is launched in its own xfce4-terminal on an Xvfb display, driven
-# with xdotool, and captured with ImageMagick `import`. Nothing touches the
-# user's real session.
-#
-#   tui-capture --out shot.png --geometry 64x50 --font "JetBrains Mono 21" \
-#               --workdir /tmp/proj --settle 8 \
-#               --env XDG_DATA_HOME=/tmp/scratch/data \
-#               --key ctrl+p --type "toggle compose" --key Return \
-#               -- /usr/bin/myeditor README.md
-#
-# --shot takes a screenshot mid-sequence, in among the keys. That is how a
-# capture and something the program can only tell you afterwards — a UI tree
-# dump, say — come from one run and so describe the same screen.
-#
-# --record DIR:SECONDS:FPS films the window instead of photographing it, with
-# ffmpeg's x11grab straight off the Xvfb display. `import` costs 200-400ms a
-# frame and jitters, which is fine for a screen that is holding still and
-# useless for one that is not: anything driven by a wall clock — an animation,
-# a transition, a simulation — has to be recorded, not sampled. Frames land in
-# DIR as 0001.png upward, and a spec turns the run into a beat's `shots`.
-#
-# Recording does NOT block: ffmpeg is started and the key sequence carries on
-# over it, so the steps that follow are filmed. That is what lets a clip open
-# on the screen at rest and then show the thing being triggered — put the
-# --record before the keystroke that starts it, and a --sleep in between. The
-# run ends on its own after SECONDS; the sequence waits for it at the end.
-set -euo pipefail
+#!/usr/bin/env python3
+"""Screenshot or film a terminal program running on a headless X display.
 
-DISPLAY_NUM=":99"
-SCREEN="1600x2200x24"
-GEOMETRY="80x24"
-FONT="JetBrains Mono 21"
-WORKDIR="$PWD"
-SETTLE=8
-OUT=""
-ACTIONS=()
-ENVS=()
-KEEP=0
-STOP=0
+The program is launched in its own terminal on an Xvfb display, driven with
+xdotool, and grabbed with `xwd`. Nothing touches the user's real session.
 
-die() { echo "tui-capture: $*" >&2; exit 1; }
+    tui-capture --out shot.png --geometry 64x50 --font "JetBrains Mono 21" \\
+                --workdir /tmp/proj --settle 8 \\
+                --env XDG_DATA_HOME=/tmp/scratch/data \\
+                --key ctrl+p --type "toggle compose" --key Return \\
+                -- /usr/bin/myeditor README.md
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --display)  DISPLAY_NUM="$2"; shift 2 ;;
-    --screen)   SCREEN="$2";      shift 2 ;;
-    --geometry) GEOMETRY="$2";    shift 2 ;;
-    --font)     FONT="$2";        shift 2 ;;
-    --workdir)  WORKDIR="$2";     shift 2 ;;
-    --settle)   SETTLE="$2";      shift 2 ;;
-    --out)      OUT="$2";         shift 2 ;;
-    --env)      ENVS+=("$2");     shift 2 ;;
-    --key)      ACTIONS+=("key:$2");   shift 2 ;;
-    --shot)     ACTIONS+=("shot:$2");  shift 2 ;;
-    --record)   ACTIONS+=("record:$2"); shift 2 ;;
-    --type)     ACTIONS+=("type:$2");  shift 2 ;;
-    --sleep)    ACTIONS+=("sleep:$2"); shift 2 ;;
-    --keep-display) KEEP=1; shift ;;
-    --stop) STOP=1; shift ;;
-    --) shift; break ;;
-    *) die "unknown flag $1" ;;
-  esac
-done
-if [[ $STOP -eq 1 ]]; then
-  # Match, then kill by pid: a `pkill -f` pattern can match the shell running
-  # this script and take it out along with the target.
-  export DISPLAY="$DISPLAY_NUM"
-  for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
-    kill "$pid" 2>/dev/null || true
-  done
-  sleep 1
-  for pid in $(pgrep -x Xvfb 2>/dev/null || true); do
-    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null \
-      | grep -q -- " $DISPLAY_NUM " && kill -9 "$pid" 2>/dev/null || true
-  done
-  exit 0
-fi
+--shot photographs the screen mid-sequence, in among the keys. That is how a
+capture and something the program can only tell you afterwards -- a UI tree
+dump, say -- come from one run and so describe the same screen.
 
-[[ -n "$OUT" ]] || die "--out is required"
-[[ $# -gt 0 ]] || die "no command given (put it after --)"
-CMD=("$@")
+--record NAME:DIR:SECONDS keeps a stretch of frames instead of one. It does
+NOT block: the run opens and the steps after it carry on inside it, which is
+the only way a keystroke and the animation it causes land in the same run. Put
+the --record before the keystroke, with a --sleep in between.
 
-for t in Xvfb xfce4-terminal xdotool import ffmpeg; do
-  command -v "$t" >/dev/null || die "missing required tool: $t"
-done
+Grabbing does not start or stop with a run. It runs from the first step to the
+last, and a run only decides which frames are kept -- see lib/capture.py for
+why that matters, and README for how to check whether it matters on your
+stack. `--backend x11grab` opts out of all of it and streams with ffmpeg.
 
-export DISPLAY="$DISPLAY_NUM"
-for e in "${ENVS[@]:-}"; do [[ -n "$e" ]] && export "${e?}"; done
+--record takes a JSON object for the rest of its options:
 
-# Start Xvfb only if this display is not already answering.
-started_xvfb=0
-if ! timeout 2 xdotool getdisplaygeometry >/dev/null 2>&1; then
-  setsid nohup Xvfb "$DISPLAY_NUM" -screen 0 "$SCREEN" -nolisten tcp \
-    >/tmp/tui-clips-xvfb$$.log 2>&1 < /dev/null &
-  started_xvfb=1
-  sleep 2
-  timeout 3 xdotool getdisplaygeometry >/dev/null 2>&1 \
-    || die "Xvfb $DISPLAY_NUM did not come up (see /tmp/tui-clips-xvfb$$.log)"
-fi
+    --record '{"name":"switch","dir":"out/frames","seconds":6,"keep":18}'
 
-# NOTE: never `pkill -f xfce4-terminal` here. A -f pattern can match the shell
-# that is running this script. Match, then kill by pid.
-for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
-  kill "$pid" 2>/dev/null || true
-done
-sleep 1
+`keep` trims the run to that many frames around the largest change in it,
+which is how a 180ms animation is found without being told when to expect it.
+"""
+from __future__ import annotations
 
-setsid nohup xfce4-terminal --disable-server \
-  --hide-menubar --hide-toolbar --hide-scrollbar --hide-borders \
-  --geometry="$GEOMETRY" --font="$FONT" --working-directory="$WORKDIR" \
-  -x "${CMD[@]}" >/tmp/tui-clips-term$$.log 2>&1 < /dev/null &
+import argparse
+import json
+import os
+import sys
+import time
 
-sleep "$SETTLE"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+import capture  # noqa: E402
 
-WID="$(xdotool search --name "Terminal - " | tail -1 || true)"
-[[ -n "$WID" ]] || die "no terminal window appeared (see /tmp/tui-clips-term$$.log)"
-xdotool windowfocus "$WID"
-sleep 0.5
 
-REC_PIDS=(); REC_DIRS=()
-for a in "${ACTIONS[@]:-}"; do
-  [[ -n "$a" ]] || continue
-  case "$a" in
-    key:*)   spec="${a#key:}"
-             if [[ "$spec" == *"*"* ]]; then
-               # NAME*N -- N presses back to back. A scroll driven one press
-               # per action would spend a minute on what the program does in
-               # a second, and would land as N jumps rather than one travel.
-               xdotool key --window "$WID" --repeat "${spec##*\*}" \
-                       --repeat-delay 40 "${spec%%\**}"
-               sleep 0.4
-             else
-               xdotool key --window "$WID" "$spec"; sleep 1.2
-             fi ;;
-    type:*)  xdotool type  --window "$WID" --delay 40 "${a#type:}"; sleep 1.2 ;;
-    sleep:*) sleep "${a#sleep:}" ;;
-    shot:*)  mkdir -p "$(dirname "${a#shot:}")"
-             import -window "$WID" "${a#shot:}" ;;
-    record:*)
-             IFS=: read -r rdir rsecs rfps <<< "${a#record:}"
-             mkdir -p "$rdir"
-             # Grab the window's rectangle off the display rather than the
-             # window itself: x11grab takes a screen region, and on a headless
-             # Xvfb the window is the only thing in it anyway.
-             eval "$(xdotool getwindowgeometry --shell "$WID")"
-             # x11grab wants even dimensions for most encoders; PNG does not
-             # care, but keeping it even avoids a stride surprise if the frames
-             # are ever muxed straight to video.
-             ffmpeg -v error -y -f x11grab -draw_mouse 0 \
-                    -video_size "$((WIDTH - WIDTH % 2))x$((HEIGHT - HEIGHT % 2))" \
-                    -framerate "$rfps" -i "${DISPLAY_NUM}+${X},${Y}" \
-                    -t "$rsecs" -fps_mode passthrough "$rdir/%04d.png" &
-             REC_PIDS+=("$!"); REC_DIRS+=("$rdir") ;;
-  esac
-done
-# Let any recording run out its clock before the window is torn down.
-for pid in "${REC_PIDS[@]:-}"; do [[ -n "$pid" ]] && wait "$pid" || true; done
-for d in "${REC_DIRS[@]:-}"; do
-  [[ -n "$d" ]] && echo "recorded $(ls "$d" | wc -l) frames -> $d" >&2
-done
-sleep 1.5
+class Step(argparse.Action):
+    """collect the action flags in the order they were given"""
 
-mkdir -p "$(dirname "$OUT")"
-import -window "$WID" "$OUT"
+    def __call__(self, parser, ns, value, option_string=None):
+        ns.actions = getattr(ns, "actions", None) or []
+        ns.actions.append((self.dest, value))
 
-for pid in $(pgrep -f "xfce4-terminal --disable-server" 2>/dev/null || true); do
-  kill "$pid" 2>/dev/null || true
-done
-if [[ $started_xvfb -eq 1 && $KEEP -eq 0 ]]; then
-  for pid in $(pgrep -x Xvfb 2>/dev/null || true); do
-    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null \
-      | grep -q -- " $DISPLAY_NUM " && kill -9 "$pid" 2>/dev/null || true
-  done
-fi
 
-echo "$OUT"
+def jarg(value: str, key: str = None) -> dict:
+    """a JSON object, or a bare value under `key` for the short spelling"""
+    value = value.strip()
+    if value.startswith("{"):
+        return json.loads(value)
+    return {key: value} if key else json.loads(value)
+
+
+def parse_record(value: str) -> dict:
+    if value.strip().startswith("{"):
+        d = json.loads(value)
+    else:
+        # NAME:DIR:SECONDS[:FPS], for driving it by hand
+        parts = value.split(":")
+        if len(parts) < 3:
+            raise SystemExit("--record wants NAME:DIR:SECONDS or a JSON object")
+        d = {"name": parts[0], "dir": parts[1], "seconds": float(parts[2])}
+        if len(parts) > 3:
+            d["fps"] = float(parts[3])
+    d.setdefault("name", os.path.basename(d["dir"]))
+    return d
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--display", default=":99")
+    ap.add_argument("--screen", default="1600x2200x24")
+    ap.add_argument("--geometry", default="80x24")
+    ap.add_argument("--font", default="JetBrains Mono 21")
+    ap.add_argument("--workdir")
+    ap.add_argument("--settle", type=float, default=8.0)
+    ap.add_argument("--out")
+    ap.add_argument("--env", action="append", default=[])
+    ap.add_argument("--term", default="xfce4-terminal", choices=capture.Session.TERMS)
+    ap.add_argument("--backend", default="xwd",
+                    choices=["xwd", "import", "x11grab"],
+                    help="how frames are taken. xwd is the cheap shutter and "
+                         "the default; x11grab streams with ffmpeg instead and "
+                         "turns the continuous grab off")
+    ap.add_argument("--grab-fps", type=float, default=30.0,
+                    help="target continuous grab rate; 0 grabs flat out")
+    ap.add_argument("--key-settle", type=float, default=0.12,
+                    help="pause after a key. Low by default: the animation "
+                         "being filmed is often shorter than the pause")
+    ap.add_argument("--type-settle", type=float, default=0.4)
+    ap.add_argument("--locale", default="C.UTF-8",
+                    help="LANG/LC_ALL for the program. A terminal decoding "
+                         "box-drawing glyphs as latin-1 wraps every line")
+    ap.add_argument("--drain-dir", help="where discarded grabs go")
+    ap.add_argument("--verify", help="JSON: regions to measure per frame")
+    ap.add_argument("--report", help="write the take report here as JSON")
+    ap.add_argument("--keep-display", action="store_true")
+    ap.add_argument("--stop", action="store_true")
+
+    for flag, dest in [("--key", "key"), ("--type", "type"),
+                       ("--sleep", "sleep"), ("--shot", "shot"),
+                       ("--record", "record"), ("--drag", "drag"),
+                       ("--click", "click"), ("--move", "move"),
+                       ("--park", "park")]:
+        ap.add_argument(flag, dest=dest, action=Step,
+                        nargs=0 if dest == "park" else None)
+
+    args, rest = ap.parse_known_args()
+    actions = getattr(args, "actions", None) or []
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+
+    if args.stop:
+        capture.kill_display(args.display)
+        return
+    if not args.out:
+        raise SystemExit("tui-capture: --out is required")
+    if not rest:
+        raise SystemExit("tui-capture: no command given (put it after --)")
+
+    env = {}
+    for e in args.env:
+        k, _, v = e.partition("=")
+        env[k] = v
+
+    s = capture.Session(
+        display=args.display, screen=args.screen, geometry=args.geometry,
+        font=args.font, workdir=args.workdir, settle=args.settle,
+        term=args.term, backend=args.backend, grab_fps=args.grab_fps,
+        key_settle=args.key_settle, type_settle=args.type_settle,
+        locale=args.locale, env=env)
+
+    drain = args.drain_dir or os.path.join(
+        os.path.dirname(os.path.abspath(args.out)), "drain")
+    report = {}
+    try:
+        s.start_x()
+        s.launch(rest)
+        s.begin_grabbing(drain)
+        for kind, value in actions:
+            if kind == "key":
+                if value.strip().startswith("{"):
+                    d = json.loads(value)
+                    s.key(d["key"], int(d.get("repeat", 1)), d.get("settle"))
+                else:
+                    spec, _, rep = value.partition("*")
+                    s.key(spec, int(rep or 1))
+            elif kind == "type":
+                if value.strip().startswith("{"):
+                    d = json.loads(value)
+                    s.type(d["text"], d.get("settle"))
+                else:
+                    s.type(value)
+            elif kind == "sleep":
+                time.sleep(float(value))
+            elif kind == "shot":
+                s.shot(value)
+            elif kind == "record":
+                d = parse_record(value)
+                s.record(d["name"], d["dir"], d["seconds"],
+                         d.get("fps", 30), d.get("keep", 0),
+                         d.get("anchor", "max-diff"))
+            elif kind == "drag":
+                s.drag(**jarg(value))
+            elif kind == "click":
+                s.click(**jarg(value))
+            elif kind == "move":
+                s.move(**jarg(value))
+            elif kind == "park":
+                s.park()
+        s.await_runs()
+        s.shot(args.out)
+        s.end_grabbing()
+        report = s.finish(json.loads(args.verify) if args.verify else None)
+    finally:
+        s.stop(keep_display=args.keep_display)
+
+    if report:
+        print(capture.report_text(report), file=sys.stderr)
+        if args.report:
+            with open(args.report, "w") as fh:
+                json.dump(report, fh, indent=1)
+    print(args.out)
+
+
+if __name__ == "__main__":
+    main()
