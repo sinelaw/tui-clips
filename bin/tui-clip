@@ -8,6 +8,7 @@ a solo clip, for a feature that has nothing to compare against. A spec with a
     tui-clip specs/thing.json                 # capture, render, encode
     tui-clip specs/thing.json --skip-capture  # reuse out/<name>/*.png
     tui-clip specs/thing.json --stills        # capture only, then stop
+    tui-clip specs/thing.json --draft         # half size, fast encode
 
 Captures land in out/<name>/, the frame sequence in out/<name>/frames/, and the
 finished mp4 in out/<name>.mp4.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -24,6 +26,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 import render  # noqa: E402
+import capture as capture_lib  # noqa: E402
 
 
 def expand(value: str, ctx: dict) -> str:
@@ -57,8 +60,27 @@ def run_frames(name: str, pane: str, shots_dir: str) -> list[str]:
     return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(".png")]
 
 
+def xdg_env(scratch: str, pane: str) -> dict:
+    """per-pane XDG directories, so a clip cannot touch a real install.
+
+    A program that keeps history, sessions or a plugin cache will find them,
+    write to them, and show a different screen the second time it is filmed.
+    Pointed at a scratch of their own, each pane starts from the same nothing
+    every time.
+    """
+    base = os.path.join(scratch, "xdg", pane)
+    env = {}
+    for var, sub in (("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"),
+                     ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config"),
+                     ("XDG_RUNTIME_DIR", "run")):
+        d = os.path.join(base, sub)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        env[var] = d
+    return env
+
+
 def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
-            shots_dir: str) -> None:
+            shots_dir: str, report_path: str | None = None) -> None:
     cap = spec["capture"]
     p = cap["panes"][pane]
     ctx = {"scratch": scratch, "proj": proj, "pane": pane}
@@ -73,29 +95,103 @@ def capture(spec: dict, pane: str, out_png: str, proj: str, scratch: str,
             "--display", cap.get("display", ":99"),
             "--screen", cap.get("screen", "1600x2200x24"),
             "--settle", str(p.get("settle", cap.get("settle", 8))),
+            "--term", cap.get("term", "xfce4-terminal"),
+            "--backend", cap.get("backend", "xwd"),
+            "--grab-fps", str(cap.get("grab_fps", 30)),
+            "--key-settle", str(cap.get("key_settle", 0.12)),
+            "--type-settle", str(cap.get("type_settle", 0.4)),
+            "--locale", cap.get("locale", "C.UTF-8"),
             "--keep-display"]
+    if cap.get("verify"):
+        argv += ["--verify", json.dumps(cap["verify"])]
+    if report_path:
+        argv += ["--report", report_path]
+    env = {}
+    if cap.get("xdg", True):
+        env.update(xdg_env(scratch, pane))
     for k, v in {**cap.get("env", {}), **p.get("env", {})}.items():
-        argv += ["--env", f"{k}={expand(v, ctx)}"]
+        env[k] = expand(v, ctx)
+    for k, v in env.items():
+        argv += ["--env", f"{k}={v}"]
     for step in [*cap.get("keys", []), *p.get("keys", [])]:
-        if "key" in step:
-            # {"key": "Down", "repeat": 12} -> one travel, not twelve jumps
-            rep = int(step.get("repeat", 1))
-            argv += ["--key", f"{step['key']}*{rep}" if rep > 1 else step["key"]]
-        elif "type" in step:
-            argv += ["--type", step["type"]]
-        elif "sleep" in step:
-            argv += ["--sleep", str(step["sleep"])]
-        elif "shot" in step:
-            argv += ["--shot", shot_path(step["shot"], pane, shots_dir, ctx)]
-        elif "record" in step:
-            # Film the window rather than photographing it: anything moving
-            # under its own clock is sampled wrong by `import`.
-            argv += ["--record", "{}:{}:{}".format(
-                run_dir(step["record"], pane, shots_dir),
-                step.get("seconds", 5), step.get("fps", 30))]
+        argv += step_argv(step, pane, shots_dir, ctx)
     argv += ["--"] + [expand(a, ctx) for a in p["argv"]]
     print(f"  capturing {pane} ...", flush=True)
     subprocess.run(argv, check=True, stdout=subprocess.DEVNULL)
+
+
+def step_argv(step: dict, pane: str, shots_dir: str, ctx: dict) -> list[str]:
+    """one spec step as flags for tui-capture"""
+    if "key" in step:
+        # {"key": "Down", "repeat": 12} -> one travel, not twelve jumps
+        d = {"key": step["key"]}
+        if int(step.get("repeat", 1)) > 1:
+            d["repeat"] = int(step["repeat"])
+        if "settle" in step:
+            d["settle"] = float(step["settle"])
+        return ["--key", json.dumps(d) if len(d) > 1 else step["key"]]
+    if "type" in step:
+        d = {"text": step["type"]}
+        if "settle" in step:
+            d["settle"] = float(step["settle"])
+        return ["--type", json.dumps(d) if len(d) > 1 else step["type"]]
+    if "sleep" in step:
+        return ["--sleep", str(step["sleep"])]
+    if "shot" in step:
+        return ["--shot", shot_path(step["shot"], pane, shots_dir, ctx)]
+    if "record" in step:
+        # A run is opened, not blocked on: the steps after it are the point,
+        # since they are what puts the keystroke and the animation it causes
+        # inside the same recording.
+        d = {"name": step["record"],
+             "dir": run_dir(step["record"], pane, shots_dir),
+             "seconds": step.get("seconds", 5),
+             "fps": step.get("fps", 30)}
+        if step.get("keep"):
+            d["keep"] = int(step["keep"])
+            d["anchor"] = step.get("anchor", "max-diff")
+        return ["--record", json.dumps(d)]
+    for kind in ("drag", "click", "move"):
+        if kind in step:
+            return [f"--{kind}", json.dumps(step[kind])]
+    if step.get("park"):
+        return ["--park"]
+    raise SystemExit(f"unknown capture step {step!r}")
+
+
+def draft(spec: dict) -> None:
+    """the same clip at a fraction of the size, for checking the framing.
+
+    Every framing decision -- what a note points at, whether a pane is wide
+    enough, whether two things collide -- is legible at half size, and half
+    size with a fast encode renders in tens of seconds rather than minutes.
+
+    The size is derived rather than left to the caller: libx264 refuses a
+    dimension that is not divisible by two, and a chrome draws at 1/scale of
+    the canvas and needs that to divide as well. Both of those are things a
+    person discovers by hitting them.
+    """
+    r = spec["render"]
+    w, h = r.get("size", [1080, 1080])
+    if r.get("chrome"):
+        # A chrome lays itself out at 1/scale of the canvas and upscales. Halve
+        # the upscale, not the layout: halving the layout would shrink the
+        # window's own type relative to its furniture, which is the one thing
+        # a chrome draft must not change.
+        cs = int(r["chrome"].get("scale", 3))
+        ns = max(1, cs - 1)
+        f = ns / cs
+        r["chrome"] = {**r["chrome"], "scale": ns}
+        step = math.lcm(2, ns)
+    else:
+        f, step = 0.5, 2
+    nw = max(step, int(w * f) // step * step)
+    nh = max(step, int(h * f) // step * step)
+    r["size"] = [nw, nh]
+    r["draft_scale"] = nw / w
+    r["fps"] = min(int(r.get("fps", 60)), 30)
+    spec["encode"] = {"crf": 30, "preset": "ultrafast"}
+    print(f"  draft: {w}x{h} -> {nw}x{nh} at {r['fps']}fps", flush=True)
 
 
 def main() -> None:
@@ -103,6 +199,9 @@ def main() -> None:
     ap.add_argument("spec")
     ap.add_argument("--skip-capture", action="store_true")
     ap.add_argument("--stills", action="store_true")
+    ap.add_argument("--draft", action="store_true",
+                    help="half size, 30fps, fast encode -- for checking the "
+                         "framing before paying for the real render")
     ap.add_argument("--out")
     args = ap.parse_args()
 
@@ -114,6 +213,8 @@ def main() -> None:
     frames = os.path.join(outdir, "frames")
     shots_dir = os.path.join(outdir, "shots")
     os.makedirs(outdir, exist_ok=True)
+    if args.draft:
+        draft(spec)
 
     panes = list(spec["capture"]["panes"])
     captures = {p: os.path.join(outdir, f"{p}.png") for p in panes}
@@ -140,14 +241,29 @@ def main() -> None:
             dst = expand(dst, {"scratch": scratch, "proj": proj})
             shutil.copytree(expand(src, {}), dst, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(".git", "logs"))
+        reports = {}
         try:
             for pane in panes:
-                capture(spec, pane, captures[pane], proj, scratch, shots_dir)
+                rp = os.path.join(outdir, f"take-{pane}.json")
+                capture(spec, pane, captures[pane], proj, scratch, shots_dir, rp)
+                if os.path.exists(rp):
+                    with open(rp) as fh:
+                        reports[pane] = json.load(fh)
         finally:
             # one Xvfb for every pane; tear it down however we got here
             subprocess.run([os.path.join(ROOT, "bin", "tui-capture"), "--stop",
                             "--display", spec["capture"].get("display", ":99")],
                            check=False)
+        bad = False
+        for pane, rep in reports.items():
+            print(f"  take {pane}:")
+            print("    " + capture_lib.report_text(rep).replace("\n", "\n    "))
+            bad = bad or any(r.get("verify", {}).get("ok") is False
+                             for r in rep.get("runs", {}).values())
+        if bad:
+            # Worth knowing before four minutes of rendering, not after.
+            print("  ! a run failed its verify; see the report above",
+                  file=sys.stderr)
 
     shots, runs = {}, {}
     for pane in panes:
