@@ -1484,8 +1484,12 @@ class ExplodeRenderer:
 
         self.W, self.H = r.get("size", [1920, 1080])
         self.fps = int(r.get("fps", 60))
-        self.header_h = int(r.get("header_height", 96))
-        self.cap_h = int(r.get("caption_height", 132))
+        # Everything drawn in this renderer's own voice is sized off the
+        # canvas, so a half-size draft is a half-size picture rather than a
+        # full-size caption bar over a shrunken one.
+        self.k = self.H / 1080
+        self.header_h = int(r.get("header_height", 96) * self.k)
+        self.cap_h = int(r.get("caption_height", 132) * self.k)
         self.cap_y = self.H - self.cap_h
         self.vp = (0, self.header_h, self.W, self.cap_y - self.header_h)
 
@@ -1514,7 +1518,7 @@ class ExplodeRenderer:
         self.lead = lb["explode"]
         self.title = r.get("title", "")
 
-        k = self.H / 1080
+        k = self.k
         self.f_hdr = ImageFont.truetype(BOLD, int(38 * k))
         self.f_meta = ImageFont.truetype(MONO, int(24 * k))
         self.f_cap = ImageFont.truetype(BOLD, int(42 * k))
@@ -1869,16 +1873,18 @@ class ExplodeRenderer:
         self._chips(cv, d, labels)
 
         # header and caption bars, painted over whatever ran under them
+        m = int(32 * self.k)
         d.rectangle([0, 0, W, self.header_h], fill=th["bg"])
         d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
-        d.rectangle([0, self.cap_y, W, self.cap_y + 3], fill=fade_c(th["after"], 200))
+        d.rectangle([0, self.cap_y, W, self.cap_y + max(1, int(3 * self.k))],
+                    fill=fade_c(th["after"], 200))
         if self.lead:
-            d.text((32, self.header_h / 2), self.lead, font=self.f_hdr,
+            d.text((m, self.header_h / 2), self.lead, font=self.f_hdr,
                    fill=th["after"], anchor="lm")
-            d.text((W - 32, self.header_h / 2 + 2), self.title, font=self.f_meta,
-                   fill=th["muted"], anchor="rm")
+            d.text((W - m, self.header_h / 2 + 2 * self.k), self.title,
+                   font=self.f_meta, fill=th["muted"], anchor="rm")
         else:
-            d.text((32, self.header_h / 2), self.title, font=self.f_meta,
+            d.text((m, self.header_h / 2), self.title, font=self.f_meta,
                    fill=th["muted"], anchor="lm")
 
         head, sub, ca = s["head"], s["sub"], 255
@@ -1889,10 +1895,12 @@ class ExplodeRenderer:
                 head, sub, ca = prev["head"], prev["sub"], int(255 * (1 - v / 0.5))
             else:
                 ca = int(255 * ((v - 0.5) / 0.5))
-        d.rectangle([32, self.cap_y + 44, 40, self.cap_y + 86],
-                    fill=fade_c(th["after"], ca))
-        d.text((60, ty + 50), head, font=self.f_cap,
+        d.rectangle([m, self.cap_y + 44 * self.k, int(40 * self.k),
+                     self.cap_y + 86 * self.k], fill=fade_c(th["after"], ca))
+        # `ty` never existed here -- this is the caption bar, which starts at
+        # cap_y, as the rule above and the sub below it both already said.
+        d.text((60 * self.k, self.cap_y + 50 * self.k), head, font=self.f_cap,
                fill=fade_c(th["fg"], ca), anchor="lm")
-        d.text((60, self.cap_y + 94), sub, font=self.f_sub,
+        d.text((60 * self.k, self.cap_y + 94 * self.k), sub, font=self.f_sub,
                fill=fade_c(th["muted"], ca), anchor="lm")
         return cv
