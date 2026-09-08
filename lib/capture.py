@@ -242,7 +242,7 @@ class Session:
                  font="JetBrains Mono 21", workdir=None, settle=8.0,
                  term="xfce4-terminal", backend="xwd", grab_fps=30.0,
                  key_settle=0.12, type_settle=0.4, locale="C.UTF-8",
-                 env=None, drain=True):
+                 env=None):
         self.display, self.screen = display, screen
         self.geometry, self.font = geometry, font
         self.workdir = workdir or os.getcwd()
@@ -251,7 +251,6 @@ class Session:
         self.term, self.backend = term, backend
         self.grab_fps = float(grab_fps)
         self.locale = locale
-        self.drain_on = drain
         self.env = dict(env or {})
         self.cols, self.rows = (int(v) for v in geometry.lower().split("x"))
 
@@ -270,6 +269,7 @@ class Session:
         self._grab_time = 0.0
         self._started_xvfb = False
         self._ffmpegs: list[subprocess.Popen] = []
+        self._ff_runs: list[tuple[str, str]] = []   # x11grab: (name, dir)
 
     # -- environment --------------------------------------------------------
 
@@ -400,6 +400,7 @@ class Session:
 
     def _loop(self) -> None:
         interval = 1.0 / self.grab_fps if self.grab_fps > 0 else 0.0
+        misses = 0
         while not self._stop.is_set():
             t0 = time.time()
             with self._lock:
@@ -407,16 +408,20 @@ class Session:
                 path = run.next_path() if run else self._drain
             try:
                 self.grabber.grab(path)
+                misses = 0
             except subprocess.CalledProcessError:
-                # The window can go away under us at teardown; that is not
-                # worth taking the process down for.
-                break
+                # One failed grab is not worth ending a capture over; a window
+                # that has gone away for good is, and it will fail every time.
+                misses += 1
+                if misses > 20:
+                    log("grabbing stopped: the window is not answering")
+                    break
+                self._stop.wait(0.05)
+                continue
             t1 = time.time()
             if run:
                 with self._lock:
                     run.frames.append((t0, path))
-            elif not self.drain_on:
-                pass
             self._grabs += 1
             self._grab_time += t1 - t0
             rest = interval - (t1 - t0)
@@ -482,11 +487,10 @@ class Session:
         self.pointer.append({"t": time.time(), "x": x, "y": y,
                              "down": down, "visible": visible})
 
-    def move(self, col: float, row: float, steps: int = 8,
-             down: bool = False) -> None:
+    def move(self, col: float, row: float) -> None:
         x, y = self._px(col, row)
         self._mouse(x, y)
-        self._mark(x, y, down)
+        self._mark(x, y, False)
 
     def drag(self, from_col: float, to_col: float, row: float,
              from_row: float | None = None, to_row: float | None = None,
@@ -565,6 +569,7 @@ class Session:
         """
         if self.backend == "x11grab":
             self._record_ffmpeg(path, seconds, fps)
+            self._ff_runs.append((name, path))
             return
         run = Run(name, path, seconds, self.grabber.ext, keep, anchor)
         with self._lock:
@@ -606,7 +611,13 @@ class Session:
         encoded at all.
         """
         report = {"runs": {}, "grabs": self._grabs,
-                  "grab_ms": round(self.grab_rate()[1] * 1000, 2)}
+                  "grab_ms": round(self.grab_rate()[1] * 1000, 2),
+                  "backend": self.backend}
+        for name, d in self._ff_runs:
+            n = len([f for f in os.listdir(d) if f.endswith(".png")]) \
+                if os.path.isdir(d) else 0
+            report["runs"][name] = {"frames": n, "seconds": 0.0, "fps": 0.0,
+                                    "diffs": []}
         for name, run in self.runs.items():
             diffs = trim(run, self.grabber)
             span = ((run.frames[-1][0] - run.frames[0][0])
@@ -719,10 +730,14 @@ def kill_display(display: str) -> None:
 
 def report_text(report: dict) -> str:
     """the take report, short enough to read before rendering four minutes"""
-    out = [f"grabs {report['grabs']} at {report['grab_ms']}ms each"]
+    if report.get("backend") == "x11grab":
+        out = ["ffmpeg recorded the runs; no continuous grabbing"]
+    else:
+        out = [f"grabs {report['grabs']} at {report['grab_ms']}ms each"]
     for name, r in report["runs"].items():
-        line = (f"  run {name}: {r['frames']} frames over {r['seconds']}s "
-                f"({r['fps']}fps)")
+        line = f"  run {name}: {r['frames']} frames"
+        if r["seconds"]:
+            line += f" over {r['seconds']}s ({r['fps']}fps)"
         d = r.get("diffs") or []
         if d:
             line += f", change per frame max {max(d):.1f} mean {sum(d)/len(d):.1f}"

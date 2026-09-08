@@ -120,6 +120,10 @@ def main() -> None:
         rest = rest[1:]
 
     if args.stop:
+        # Terminals first: they are children of the display, and one left
+        # running holds a grab on a display that is about to go.
+        capture.Session(display=args.display, term=args.term).kill_terms()
+        time.sleep(0.5)
         capture.kill_display(args.display)
         return
     if not args.out:
