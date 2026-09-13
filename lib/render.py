@@ -1995,16 +1995,18 @@ ESTAB_H = 104
 ESTAB_GAP = 44
 # how wide a card's description is allowed to run before it wraps
 CARD_TEXT = 340
-# How much room the camera leaves around one section. Enough that the
-# neighbours stay in frame: a section read with nothing else on screen is a
-# coloured shape, and the whole claim of a breakdown is the comparison. It
-# goes up when the frame gets taller, since a taller frame fits the same wedge
-# at a bigger scale and would close in without being asked to.
-SECTION_CONTEXT = 1.7
-# A 2% sliver framed on its own terms is one flat colour from edge to edge,
-# which says nothing and loses the ring it was cut from. Past this the camera
-# stops closing in and lets the sliver be small.
-MAX_ZOOM = 3.4
+# How much air the camera leaves around a section *and its card*, which are
+# framed as one object. Little, because the card is most of the air already.
+SECTION_CONTEXT = 1.1
+# between a section's rim and its card, and between the card and the frame
+CARD_GAP = 28
+CARD_MARGIN = 30
+# A safety rail rather than a working limit. A section is framed together with
+# its card, and the card is a fixed size in pixels, so a sliver cannot fill the
+# frame with flat colour however small it is -- the card is always a third of
+# the picture and holds the zoom down on its own. This is here for the spec
+# that wants a flatter clip than the geometry would give it.
+MAX_ZOOM = 7.0
 # How far the camera pulls back over the middle of a travel. Two sections on
 # opposite sides of the ring are a long way apart once you are close to one,
 # and a flat pan between them is a wall of colour going past; lifting away and
@@ -2044,11 +2046,16 @@ def _fmt_share(f: float) -> str:
     return f"{pct:.1f}%" if pct < 10 else f"{pct:.0f}%"
 
 
-def _overlap(a, b) -> float:
-    """the area two (x0, y0, x1, y1) rects have in common"""
-    w = min(a[2], b[2]) - max(a[0], b[0])
-    h = min(a[3], b[3]) - max(a[1], b[1])
-    return w * h if w > 0 and h > 0 else 0.0
+def _push(c0, w0, c1, w1, lo, hi, out) -> float:
+    """how far a card and its section can slide together before one of them
+    hits a wall -- outwards when `out` is positive, inwards when it is not.
+
+    Never past the wall it started against, which is what the `max` is for: a
+    card already outside the frame is not helped by sliding it further out.
+    """
+    if out >= 0:
+        return max(0.0, min(hi - c1, hi - w1))
+    return -max(0.0, min(c0 - lo, w0 - lo))
 
 
 def _bbox(pts):
@@ -2197,6 +2204,8 @@ class DonutRenderer(Furniture):
         self._fit()
         self._layout_labels()
         self._place_figure()
+        self._build_cards()
+        self.section_view = {i: self._section_view(i) for i in self.visit}
         self.timeline = self._timeline()
 
     # -- camera -------------------------------------------------------------
@@ -2251,33 +2260,70 @@ class DonutRenderer(Furniture):
         return (self._arc(b0, b1, 1.0, off)
                 + self._arc(b1, b0, self.inner, off))
 
-    def _section_cam(self, i: int):
-        """the camera that reads item i, never closer than `max_zoom`"""
-        cam = self._cam_for(_bbox(self._wedge(i, pop=POP)), SECTION_CONTEXT)
-        return (min(cam[0], self.cam_whole[0] * self.max_zoom), cam[1], cam[2])
-
-    def _edge(self, i: int, out: int):
-        """the middle of item i's outer rim, or of its inner one.
-
-        Which way the card is dealt from. Dealing it from the middle of the
-        band instead lands it on the section it is annotating.
-        """
-        d = self.items[i]
-        mid = math.radians((d["a0"] + d["a1"]) / 2)
-        rad = (1.0 if out > 0 else self.inner) + POP
-        return math.cos(mid) * rad, math.sin(mid) * rad
-
     @staticmethod
     def _nearest(rim, x: float, y: float):
         """the point of `rim` closest to (x, y), all in canvas pixels.
 
-        Where a leader starts. Anchoring it at the section's mid-angle instead
-        is fine while the card is dealt radially -- the line is then a stub
-        along that radius -- but a card that had to take a corner is somewhere
-        else entirely, and a leader to the mid-angle runs the width of the
-        frame straight across the ring to reach it.
+        Where a leader starts, so that it is a stub between the section and
+        its card rather than a line across the middle of the ring.
         """
         return min(rim, key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2)
+
+    def _section_view(self, i: int):
+        """-> (camera, where the card sits) for the beat that reads item i.
+
+        The card is not fitted into whatever room the section's framing
+        happened to leave. It is the other way round: the section and its card
+        are one object, dealt out along the radius so the card is always clear
+        of the ring and always on the far side of the section from the middle,
+        and the camera frames the pair. Then the pair slides along that radius
+        until the card is against the corner of the frame, or the section is
+        against the opposite edge.
+
+        What that spends is the hole, which goes off screen. It is the right
+        thing to spend: the middle of the ring is the one part of the picture
+        that is not about the section being read.
+
+        The scale has to be solved for rather than computed, because the card
+        is a fixed size in pixels and so its size *in the picture* depends on
+        the scale that framing the picture produces. Iterating from the scale
+        the section alone would take -- an upper bound, the card only ever
+        making the box bigger -- walks down to the fixed point in a few steps.
+        """
+        card = self.cards[i]
+        w, h = card["w"], card["h"]
+        wedge = self._wedge(i, pop=POP)
+        wb = _bbox(wedge)
+        mid = math.radians((self.items[i]["a0"] + self.items[i]["a1"]) / 2)
+        ux, uy = math.cos(mid), math.sin(mid)
+
+        s = self._cam_for(wb, SECTION_CONTEXT)[0]
+        box, at = wb, (0.0, 0.0)
+        for _ in range(24):
+            cw, ch = w / s, h / s
+            reach = (1.0 + POP + math.hypot(cw, ch) / 2 + CARD_GAP * self.uk / s)
+            at = (ux * reach, uy * reach)
+            box = _union([wb, (at[0] - cw / 2, at[1] - ch / 2,
+                               at[0] + cw / 2, at[1] + ch / 2)])
+            new = min(self._cam_for(box, SECTION_CONTEXT)[0],
+                      self.scale * self.max_zoom)
+            if abs(new - s) < 0.05:
+                s = new
+                break
+            s = new
+        cam = (s, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+        # ... and now slide the pair into the corner
+        m = CARD_MARGIN * self.uk
+        v = (self.vp[0] + m, self.vp[1] + m,
+             self.vp[0] + self.vp[2] - m, self.vp[1] + self.vp[3] - m)
+        px, py = self._pt(cam, *at)
+        cr = (px - w / 2, py - h / 2, px + w / 2, py + h / 2)
+        wr = _bbox([self._pt(cam, *q) for q in wedge])
+        d = [_push(cr[k], wr[k], cr[k + 2], wr[k + 2], v[k], v[k + 2],
+                   (ux, uy)[k]) for k in (0, 1)]
+        cam = (s, cam[1] - d[0] / s, cam[2] - d[1] / s)
+        return cam, self._pt(cam, *at)
 
     # -- labels around the ring ---------------------------------------------
     def _fit(self) -> None:
@@ -2384,7 +2430,7 @@ class DonutRenderer(Furniture):
 
         cam = whole
         for i in self.visit:
-            to = self._section_cam(i)
+            to = self.section_view[i][0]
             seg("move", T["move"], cam, to, focus=i, arc=PULLBACK)
             seg("hold", float(self.items[i].get("hold", T["hold"])), to, to,
                 focus=i)
@@ -2397,22 +2443,23 @@ class DonutRenderer(Furniture):
             raise SystemExit("every donut timing is zero; nothing to render")
         return segs
 
-    def label_alpha(self, seg: dict, u: float, last: bool) -> float:
-        """how much of the labels is showing, on this segment's own clock.
+    def cut_alpha(self, seg: dict, u: float, last: bool) -> float:
+        """how much of this segment's own overlay is showing, on its clock.
 
-        Cut in and out rather than carried: they arrive once the camera has
-        settled and are gone before it starts again, so the travel between two
-        sections is the only thing moving during the travel between two
-        sections. The last segment does not fade them out -- there is nothing
-        after it to get them out of the way of.
+        Everything that is not the ring -- the labels around it, the card
+        beside a section -- is cut in and out rather than carried: it arrives
+        once the camera has settled and is gone before it starts again, so the
+        travel between two sections is the only thing moving during the travel
+        between two sections. The last segment does not fade out; there is
+        nothing after it to get out of the way of.
         """
-        if not seg["labels"]:
-            return 0.0
         t, d = u * seg["dur"], seg["dur"]
         f = min(LABEL_FADE, d / 2)
-        a = min(1.0, t / f) if f > 0 else 1.0
+        if f <= 0:
+            return 1.0
+        a = min(1.0, t / f)
         if not last:
-            a = min(a, (d - t) / f if f > 0 else 1.0)
+            a = min(a, (d - t) / f)
         return max(0.0, min(1.0, a))
 
     def total(self) -> float:
@@ -2541,94 +2588,83 @@ class DonutRenderer(Furniture):
                 line = trial
         return out + ([line] if line else [])
 
-    def _card(self, cv, d, i: int, cam, alpha: float) -> None:
-        """the section's whole annotation, pinned beside it.
+    def _build_cards(self) -> None:
+        """each section's whole annotation, drawn once.
 
         Name, number, share and the line that says what the thing *is*, all on
         the card, because the card is where the reader is already looking: the
         camera has just spent half a second putting this section in the middle
         of the frame. A description parked along the bottom of the frame is
         read after the picture has already been understood, if at all.
+
+        A fixed size in pixels, like every other bit of type here, so it is
+        the same object at every beat and can be measured and drawn once. What
+        varies frame to frame is only how much of it is showing.
         """
+        k = self.uk
+        pad = int(26 * k)
+        self.cards: dict[int, dict] = {}
+        for i, item in enumerate(self.items):
+            lines = [(item["label"], self.f_card, self.th["fg"], 0),
+                     (item["display"], self.f_big, item["color"], int(13 * k)),
+                     (f'{_fmt_share(item["share"])} of {self.total_txt}',
+                      self.f_pct, self.th["muted"], int(10 * k))]
+            for j, ln in enumerate(self._wrap(item["note"], self.f_note,
+                                              CARD_TEXT * k)):
+                lines.append((ln, self.f_note, self.note_c,
+                              int((24 if j == 0 else 9) * k)))
+            # Sized on the ink, not on the font: a card set from the ascent of
+            # four faces has a band of nothing under every line, and five lines
+            # of nothing is how a readout becomes a poster.
+            ink = [f.getbbox(t) for t, f, _, _ in lines]
+            w = (int(max(f.getlength(t) for t, f, _, _ in lines))
+                 + 2 * pad + int(10 * k))
+            h = (sum(b[3] - b[1] for b in ink)
+                 + sum(g for *_, g in lines) + 2 * pad)
+
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            cd = ImageDraw.Draw(img)
+            cd.rounded_rectangle([0, 0, w - 1, h - 1], radius=int(14 * k),
+                                 fill=(*self.th["caption_bg"], 240),
+                                 outline=(*item["color"], 128),
+                                 width=max(1, int(1 * k)))
+            cd.rectangle([0, int(14 * k), max(2, int(5 * k)), h - int(14 * k)],
+                         fill=(*item["color"], 255))
+            ty = pad
+            for (txt, font, col, above), b in zip(lines, ink):
+                # `text` puts the ascender top at `ty`, and the ascent of a
+                # face is mostly headroom for accents nothing here uses.
+                # Backing off by where the ink actually starts is what makes
+                # the height above the height the card is.
+                ty += above
+                cd.text((pad + int(10 * k), ty - b[1]), txt, font=font,
+                        fill=(*col, 255))
+                ty += b[3] - b[1]
+            self.cards[i] = {"w": w, "h": h, "img": img}
+
+    def _card(self, cv, d, i: int, alpha: float) -> None:
+        """the card, where `_section_view` decided it goes, and its leader"""
         if alpha < 0.02:
             return
-        item = self.items[i]
-        k, a = self.uk, int(255 * alpha)
-        pad, gap = int(26 * k), int(20 * k)
-        lines = [(item["label"], self.f_card, self.th["fg"], 0),
-                 (item["display"], self.f_big, item["color"], int(13 * k)),
-                 (f'{_fmt_share(item["share"])} of {self.total_txt}',
-                  self.f_pct, self.th["muted"], int(10 * k))]
-        for j, ln in enumerate(self._wrap(item["note"], self.f_note,
-                                          CARD_TEXT * k)):
-            lines.append((ln, self.f_note, self.note_c,
-                          int((24 if j == 0 else 9) * k)))
-        # Sized on the ink, not on the font: a card set from the ascent of
-        # four faces has a band of nothing under every line, and five lines of
-        # nothing is how a readout becomes a poster.
-        w = int(max(f.getlength(t) for t, f, _, _ in lines)) + 2 * pad + int(10 * k)
-        ink = [f.getbbox(t) for t, f, _, _ in lines]
-        h = (sum(b[3] - b[1] for b in ink) + sum(g for *_, g in lines)
-             + 2 * pad)
+        card = self.cards[i]
+        cam, (px, py) = self.section_view[i]
+        w, h = card["w"], card["h"]
+        x, y = int(px - w / 2), int(py - h / 2)
 
-        # The card is dealt along the radius, out of the ring or into the hole:
-        # those are the two directions that are empty whatever the camera is
-        # doing, because they are the two directions the ring is not. Dealt
-        # sideways instead it lands on the section it is annotating, which at
-        # a zoom that fills the frame with one arc is most of the frame.
-        mid = math.radians((item["a0"] + item["a1"]) / 2)
-        reach = math.hypot(w, h) / 2 + gap
-        rim = [self._pt(cam, *q) for q in self._wedge(i, pop=POP)]
-        wedge = _bbox(rim)
-        spots = []
-        for out in (1, -1):
-            ex, ey = self._pt(cam, *self._edge(i, out))
-            spots.append(self._place(ex + math.cos(mid) * reach * out - w / 2,
-                                     ey + math.sin(mid) * reach * out - h / 2,
-                                     w, h))
-        # A section wide enough to reach both ways across the frame leaves no
-        # radius clear, and a corner is then the only empty part of the picture.
-        # Tried last and only taken when it is strictly clearer, so the ordinary
-        # case stays the ordinary case.
-        for qx in (self.vp[0], self.vp[0] + self.vp[2] - w):
-            for qy in (self.vp[1], self.vp[1] + self.vp[3] - h):
-                spots.append(self._place(qx, qy, w, h))
-        x, y = min(spots, key=lambda q: _overlap((q[0], q[1], q[0] + w,
-                                                  q[1] + h), wedge))
-        ax, ay = self._nearest(rim, x + w / 2, y + h / 2)
-
+        ax, ay = self._nearest([self._pt(cam, *q)
+                                for q in self._wedge(i, pop=POP)], px, py)
         edge = x + w if x + w < ax else (x if x > ax else ax)
-        d.line([(ax, ay), (edge, max(y + int(20 * k),
-                                     min(y + h - int(20 * k), ay)))],
-               fill=fade_c(item["color"], int(a * 0.8)),
-               width=max(1, int(2 * k)))
+        d.line([(ax, ay), (edge, max(y + int(20 * self.uk),
+                                     min(y + h - int(20 * self.uk), ay)))],
+               fill=fade_c(self.items[i]["color"], int(255 * alpha * 0.8)),
+               width=max(1, int(2 * self.uk)))
 
-        card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        cd = ImageDraw.Draw(card)
-        cd.rounded_rectangle([0, 0, w - 1, h - 1], radius=int(14 * k),
-                             fill=(*self.th["caption_bg"], int(a * 0.94)),
-                             outline=(*item["color"], int(a * 0.5)),
-                             width=max(1, int(1 * k)))
-        cd.rectangle([0, int(14 * k), max(2, int(5 * k)), h - int(14 * k)],
-                     fill=(*item["color"], a))
-        ty = pad
-        for (txt, font, col, above), b in zip(lines, ink):
-            # `text` puts the ascender top at `ty`, and the ascent of a face is
-            # mostly headroom for accents nothing here uses. Backing off by
-            # where the ink actually starts is what makes the height above the
-            # height the card is.
-            ty += above
-            cd.text((pad + int(10 * k), ty - b[1]), txt, font=font,
-                    fill=(*col, a))
-            ty += b[3] - b[1]
-        cv.paste(card, (int(x), int(y)), card)
-
-    def _place(self, x: float, y: float, w: int, h: int):
-        """`x, y` brought inside the viewport"""
-        vx, vy, vw, vh = self.vp
-        m = int(28 * self.uk)
-        return (max(vx + m, min(vx + vw - w - m, x)),
-                max(vy + m, min(vy + vh - h - m, y)))
+        img = card["img"]
+        if alpha < 0.995:
+            img = img.copy()
+            img.putalpha(img.getchannel("A").point(
+                lambda v: int(v * alpha)))
+        cv.paste(img, (x, y), img)
 
     # -- main ---------------------------------------------------------------
     def run(self) -> int:
@@ -2645,7 +2681,8 @@ class DonutRenderer(Furniture):
         p = ease(u)
         cam = self._cam_lerp(s["cam0"], s["cam1"], p, s["arc"])
         sweep = lerp(s["sweep0"], s["sweep1"], p)
-        lab = self.label_alpha(s, u, s is self.timeline[-1])
+        cut = self.cut_alpha(s, u, s is self.timeline[-1])
+        lab = cut if s["labels"] else 0.0
 
         # The dim follows the camera, so it arrives with the section rather
         # than snapping on ahead of it; on the way out it releases the same way.
@@ -2666,12 +2703,12 @@ class DonutRenderer(Furniture):
         self._hole(d, lab)
         self._labels(d, lab)
         self._establish(d, s["estab"][0], s["estab"][1], lab)
-        # One card at a time: two of them dissolving into each other at
-        # different places on the frame is a smear, so the old one leaves over
-        # the first half of a travel and the new one arrives over the second.
-        for i, w in focus:
-            if w > 0.5:
-                self._card(cv, d, i, cam, (w - 0.5) * 2)
+        # The card belongs to the beat that holds on its section, and the
+        # camera is still for the whole of that beat. Shown during a travel it
+        # would have to be drawn against a camera it was not placed for, and
+        # would slide across the frame to catch up.
+        if s["kind"] == "hold":
+            self._card(cv, d, s["focus"], cut)
 
         # The word along the top takes the colour of whichever section the
         # frame is mostly about, so the swap lands with the section rather than

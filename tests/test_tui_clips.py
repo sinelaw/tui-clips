@@ -8,6 +8,7 @@ on the event rather than near it.
 """
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -25,6 +26,11 @@ import render  # noqa: E402
 import xwdfile  # noqa: E402
 
 FAILED: list[str] = []
+
+
+def _bbox_of(pts):
+    return (min(p[0] for p in pts), min(p[1] for p in pts),
+            max(p[0] for p in pts), max(p[1] for p in pts))
 
 
 def check(cond, msg):
@@ -240,27 +246,74 @@ def test_donut_visits_every_section_once(tmp):
 
 
 def test_donut_camera_closes_in_and_comes_back(tmp):
-    """a section is read closer than the whole, and a sliver is not read so
-    close that the ring around it is lost"""
+    """a section is read closer than the whole, the smaller the closer"""
     r = render.make(donut_spec(), {}, os.path.join(tmp, "f"))
-    whole = r.cam_whole[0]
-    for i, d in enumerate(r.items):
-        s = r._section_cam(i)[0]
+    whole = r.scale
+    zooms = []
+    for i in r.visit:
+        s = r.section_view[i][0][0]
+        zooms.append(s / whole)
         check(s >= whole - 1e-6,
-              f'{d["label"]} is read no further away than the whole '
+              f'{r.items[i]["label"]} is read no further away than the whole '
               f"({s:.1f} vs {whole:.1f})")
         check(s <= whole * r.max_zoom + 1e-6,
-              f'{d["label"]} is held to max_zoom ({s / whole:.2f}x)')
-    check(r._section_cam(2)[0] == whole * r.max_zoom,
-          "the 4% sliver is the one the cap actually bites on")
+              f'{r.items[i]["label"]} is held to max_zoom ({s / whole:.2f}x)')
+    check(zooms == sorted(zooms),
+          f"the smaller the share the closer the camera goes ({zooms})")
     # the travel lifts away and settles again rather than sliding flat across
-    a, b = r._section_cam(0), r._section_cam(1)
+    a, b = r.section_view[0][0], r.section_view[1][0]
     mid = r._cam_lerp(a, b, 0.5, render.PULLBACK)[0]
     check(mid < min(a[0], b[0]),
           f"the camera pulls back over the middle of a travel ({mid:.1f})")
     check(abs(r._cam_lerp(a, b, 0.0, render.PULLBACK)[0] - a[0]) < 1e-6
           and abs(r._cam_lerp(a, b, 1.0, render.PULLBACK)[0] - b[0]) < 1e-6,
           "and lands exactly where it was going")
+
+
+def test_donut_card_is_outside_the_ring_and_in_a_corner(tmp):
+    """the framing is chosen to fit the card, not the other way round.
+
+    The card goes beyond the section's rim, on the far side from the middle of
+    the ring, and is then slid into the corner of the frame on that side --
+    pushing the hole off screen when that is what it takes.
+    """
+    items = [{"label": "Aye", "value": 148, "note": "the big one"},
+             {"label": "Bee", "value": 96, "note": "the next"},
+             {"label": "Cee", "value": 40, "note": "smaller"},
+             {"label": "Dee", "value": 9, "note": "a sliver"}]
+    r = render.make(donut_spec(donut={"items": items}), {},
+                    os.path.join(tmp, "f"))
+    for i in r.visit:
+        cam, (px, py) = r.section_view[i]
+        c, item = r.cards[i], r.items[i]
+        box = (px - c["w"] / 2, py - c["h"] / 2,
+               px + c["w"] / 2, py + c["h"] / 2)
+        # clear of the ring: every corner of the card is outside the rim
+        ox, oy = r._pt(cam, 0.0, 0.0)
+        near = min(math.hypot(qx - ox, qy - oy)
+                   for qx in (box[0], box[2]) for qy in (box[1], box[3]))
+        check(near > cam[0] * (1.0 + render.POP),
+              f'{item["label"]}: the card clears the ring by '
+              f"{near - cam[0] * (1.0 + render.POP):.0f}px")
+        # on the far side of the section from the middle
+        mid = math.radians((item["a0"] + item["a1"]) / 2)
+        dot = ((px - ox) * math.cos(mid) + (py - oy) * math.sin(mid))
+        check(dot > 0, f'{item["label"]}: the card is away from the centre')
+        # and in frame, having been slid as far out as it would go
+        check(box[0] >= r.vp[0] - 1 and box[2] <= r.vp[0] + r.vp[2] + 1
+              and box[1] >= r.vp[1] - 1 and box[3] <= r.vp[1] + r.vp[3] + 1,
+              f'{item["label"]}: the card is inside the frame')
+        # the whole section is on screen: that is what the camera is for
+        wr = _bbox_of([r._pt(cam, *q) for q in r._wedge(i, pop=render.POP)])
+        check(wr[0] >= r.vp[0] - 1 and wr[2] <= r.vp[0] + r.vp[2] + 1
+              and wr[1] >= r.vp[1] - 1 and wr[3] <= r.vp[1] + r.vp[3] + 1,
+              f'{item["label"]}: the whole section is on screen')
+    # and at least one beat did push the hole off the frame
+    off = sum(not (r.vp[0] <= r._pt(r.section_view[i][0], 0.0, 0.0)[0]
+                   <= r.vp[0] + r.vp[2]
+                   and r.vp[1] <= r._pt(r.section_view[i][0], 0.0, 0.0)[1]
+                   <= r.vp[1] + r.vp[3]) for i in r.visit)
+    check(off > 0, f"{off} of {len(r.visit)} beats push the hole off screen")
 
 
 def test_donut_labels_do_not_overlap(tmp):
@@ -308,7 +361,7 @@ def test_donut_labels_never_move(tmp):
     seen, moving = 0, 0
     for n in range(int(round(r.total() * r.fps))):
         s, u, _ = r.at(n / r.fps)
-        a = r.label_alpha(s, u, s is r.timeline[-1])
+        a = (r.cut_alpha(s, u, s is r.timeline[-1]) if s["labels"] else 0.0)
         cam = r._cam_lerp(s["cam0"], s["cam1"], render.ease(u), s["arc"])
         off = max(abs(cam[k] - r.cam_whole[k]) for k in range(3)) > 1e-6
         seen += a > 0

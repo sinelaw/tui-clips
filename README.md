@@ -780,7 +780,7 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
   "start_angle": -90,          // 12 o'clock, read clockwise
   "thickness": 0.40,           // the band, as a fraction of the outer radius
   "gap": 1.0,                  // degrees of ground between two sections
-  "max_zoom": 3.4,             // how close a sliver may be read
+  "max_zoom": 7.0,             // a rail on how close a section may be read
   "dim": 0.68,                 // how far the other sections go back
   "items": [
     {"label": "Syntax trees",  // beside the ring, and on the card
@@ -812,9 +812,27 @@ place to look for what the thing in the middle is already about. It gets read
 after the picture has been understood, if at all.
 
 So an item's whole annotation — name, value, share, and the `note` that says
-what the thing *is* — is on the card pinned beside its section. The only words
-that go under the ring are `intro_caption` and `outro_caption`, centred
-directly beneath it, and they are only up while the camera is still.
+what the thing *is* — is on the card beside its section. The only words that
+go under the ring are `intro_caption` and `outro_caption`, centred directly
+beneath it, and they are only up while the camera is still.
+
+**The card decides the framing, not the other way round.** A section and its
+card are one object: the card is dealt out along the radius, so it is always
+clear of the ring and always on the far side of the section from the middle,
+and the camera frames the pair — then slides along that radius until the card
+is against the corner of the frame, or the section is against the opposite
+edge. What that spends is the hole, which goes off screen on most beats. It is
+the right thing to spend: the middle of the ring is the one part of the
+picture that is not about the section being read.
+
+The scale has to be solved for rather than computed, because the card is a
+fixed size in pixels and so its size *in the picture* depends on the scale
+that framing the picture produces. Iterating from the scale the section alone
+would take — an upper bound, since the card only ever makes the box bigger —
+walks down to the fixed point in a few steps. A small section therefore ends
+up read closer than a large one, and `max_zoom` is a rail rather than a
+working limit: the card is a fixed share of the frame however small the
+section is, so a sliver can never fill the frame with flat colour.
 
 **Keep labels short.** How big the ring can be is decided by the longest
 label: the words are a fixed size in pixels, and they have to fit between the
@@ -826,24 +844,21 @@ Names go around the ring, explanations go in the `note`.
 false` keeps the order you wrote, for a breakdown where that order means
 something — a timeline, a pipeline, a call stack.
 
-**The labels are cut, not carried.** They belong to the establishing shot, not
-to the ring: they are laid out once in frame coordinates and are only ever on
-screen while the camera is sitting still on the whole figure, arriving and
-leaving over `LABEL_FADE` (0.22s) at either end of it. Laid out in the world
-instead they travel with the ring, and a zoom deals six labels outwards across
-the frame and off it — movement the eye reads as *the labels* doing something,
-at the one moment the camera is what is supposed to be moving. There is no
-frame in which a label is both visible and in the wrong place.
+**Nothing but the ring is ever carried by the camera.** The labels around the
+figure and the card beside a section are laid out once in frame coordinates
+and cut in and out over `LABEL_FADE` (0.22s) around the camera — up only while
+it is sitting still, gone before it starts again. Laid out in the world
+instead, a zoom deals six labels outwards across the frame and off it, which
+the eye reads as *the labels* doing something at the one moment the camera is
+what is supposed to be moving. There is no frame in which a label or a card is
+both visible and in the wrong place.
 
-Two more things the camera does. It never closes in further than `max_zoom`,
-because a 2% sliver framed on its own terms is one flat colour from edge to
-edge, which says nothing and loses the ring it was cut from. And it pulls back
-a little over the middle of every travel rather than sliding flat across: two
-sections on opposite sides of the ring are a long way apart once you are close
-to one, and lifting away and settling again puts the whole ring back on screen
-at the midpoint — which is where a reader who has lost their place gets it
-back. A little, because the travel is short: a deep arc crossed in half a
-second is a lurch rather than a lift.
+The camera also pulls back a little over the middle of every travel rather
+than sliding flat across: two sections on opposite sides of the ring are a
+long way apart once you are close to one, and lifting away and settling again
+puts the whole ring back on screen at the midpoint — which is where a reader
+who has lost their place gets it back. A little, because the travel is short:
+a deep arc crossed in half a second is a lurch rather than a lift.
 
 ## Storyboards
 
@@ -857,7 +872,7 @@ than crops: a camera is `(pixels per world unit, x, y)`, the ring is a set of
 annulus polygons drawn at that scale into a supersampled layer, and a scale is
 interpolated in log space so that halfway between 1× and 4× is 2× rather than
 2.5×. Everything that is not the ring — labels, the total in the hole, the
-establishing caption — is placed once in frame coordinates by `_place_figure`
-and never moves. The header strip and the caption bar are `Furniture`, shared
+establishing caption, each section's card — is placed once in frame
+coordinates, by `_place_figure` and `_section_view`, and never moves. The header strip and the caption bar are `Furniture`, shared
 because two storyboards that draw the same frame separately draw it a couple
 of pixels apart; a donut wears the header only.
