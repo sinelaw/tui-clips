@@ -2,7 +2,8 @@
 
 Short annotated videos of a terminal program, from a JSON spec — two builds
 side by side, one build on its own, or one screen taken apart into the
-elements behind it.
+elements behind it. Or, when what you have to explain is a set of numbers
+rather than a screen, a donut the camera reads one section at a time.
 
 ## Quick start
 
@@ -19,7 +20,14 @@ touches the terminal or editor you have open.
 A spec goes stale when the program it films changes its layout, so specs live
 with the program, not here. The worked examples below are fresh's, in
 [`scripts/clips`](https://github.com/sinelaw/fresh/tree/master/scripts/clips);
-a spec path is any path, so yours can live wherever its subject does.
+a spec path is any path, so yours can live wherever its subject does. The one
+exception is a donut clip, which films nothing and so has nothing to go stale
+against — [`examples/memory-breakdown.json`](examples/memory-breakdown.json)
+is a complete one, and runs with no X and no terminal:
+
+```sh
+./bin/tui-clip examples/memory-breakdown.json --draft   # ~40s
+```
 
 About 75s: ~25s capturing, ~40s rendering frames, ~10s encoding. While
 iterating:
@@ -35,7 +43,7 @@ iterating:
 `tui-grid` overlays a numbered row/column grid on a capture. Annotation bands
 are written in those same cells, so you read the numbers straight off it.
 
-## Three shapes
+## Four shapes
 
 **Comparison** — panes named `before` and `after`. Both captures appear side by
 side, the BEFORE panel swipes out left, the AFTER zooms to full frame, then one
@@ -56,6 +64,19 @@ piece drawn over by another loses those pixels to a hole. A capture is flat, so
 an overlay's pixels sit in the image at the rows the things underneath occupy —
 cut those out as they are and every one of them carries a copy of the overlay
 away with it.
+
+**Donut** — no panes at all, and a `render.donut` section carrying the
+numbers. The ring draws itself in, stands as a labelled whole, and is then
+read one section at a time: the camera lands on the largest share, and pans
+and zooms to each next one down. See
+[`examples/memory-breakdown.json`](examples/memory-breakdown.json).
+
+The first three film a screen and annotate what is in it. This one has no
+screen to film: a memory breakdown, a startup-time budget, a size-on-disk
+report is a set of numbers, and the picture has to be drawn rather than
+captured. Which is what makes the camera free — every frame is drawn at the
+scale it is seen at, so a section can fill the frame as cleanly as the ring
+did, with none of the resampling a zoom into a screenshot pays for.
 
 ## What a screenshot is for
 
@@ -500,6 +521,11 @@ where the travel is `pan`, or `push` for a beat that asks for one; three
 annotations at the defaults gives 10.1s. Set any timing to `0` to drop that beat, or give one
 beat its own `hold` when it has more to show than the others.
 
+That is the spec for a clip that films something. A donut clip drops the whole
+`capture` section and swaps `render.annotations` for `render.donut` — `name`,
+`size`, `fps`, `title`, the captions, the theme and `encode` all mean the same
+things. See [Donut specs](#donut-specs).
+
 ## Framing a beat
 
 By default the camera fits the capture across the frame and travels only up and
@@ -739,11 +765,114 @@ the capture gets the real look without the run being able to write back over
 it. A `{"shot": "path"}` step takes a screenshot mid-sequence, which is how a
 capture and a dump of the same screen come out of one run.
 
+## Donut specs
+
+A donut clip has no `capture` section at all — nothing is filmed, and the
+picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
+`value`, and the one-line `note` that says what the thing *is*.
+
+```jsonc
+"donut": {
+  "unit": "MB",                // appended to every value
+  "total": "412 MB",           // what stands in the hole; default is the sum
+  "total_label": "resident",
+  "sort": true,                // rank by value, largest first (the default)
+  "start_angle": -90,          // 12 o'clock, read clockwise
+  "thickness": 0.40,           // the band, as a fraction of the outer radius
+  "gap": 1.0,                  // degrees of ground between two sections
+  "max_zoom": 7.0,             // a rail on how close a section may be read
+  "dim": 0.68,                 // how far the other sections go back
+  "items": [
+    {"label": "Syntax trees",  // beside the ring, and on the card
+     "value": 148,
+     "note": "one per buffer, kept whole so an edit reparses a subtree",
+     "display": "148.2 MB",    // optional; overrides value + unit
+     "color": [74, 222, 128],  // optional; else the next colour off the ramp
+     "hold": 3.4,              // optional; else timing.hold
+     "visit": false}           // drawn and labelled, but never dwelt on
+  ]
+}
+```
+
+Timings are `grow`, `intro`, `move`, `hold`, `regroup`, `outro`. Duration is
+`grow + intro + (move + hold) per visited item + regroup + outro`; six items at
+the defaults gives 27.3s. Set any to `0` to drop that beat.
+
+There is nothing to capture, so `--stills` and `--skip-capture` have nothing to
+do and a run is all render: about 40s for a `--draft`, a few minutes at full
+size. Every frame is drawn from scratch at three times the size and brought
+back down, which is what buys the arcs an edge that does not crawl — so the
+draft is where the framing gets checked, as it is for every other shape.
+
+**There is no caption bar.** The other shapes put a headline and a line of
+detail along the bottom of the frame. A donut does not: the camera has just
+spent half a second putting one section in the middle of the frame, which is
+where the reader is looking, and a strip of words along the bottom is a second
+place to look for what the thing in the middle is already about. It gets read
+after the picture has been understood, if at all.
+
+So an item's whole annotation — name, value, share, and the `note` that says
+what the thing *is* — is on the card beside its section. The only words that
+go under the ring are `intro_caption` and `outro_caption`, centred directly
+beneath it, and they are only up while the camera is still.
+
+**The card decides the framing, not the other way round.** A section and its
+card are one object: the card is dealt out along the radius, so it is always
+clear of the ring and always on the far side of the section from the middle,
+and the camera frames the pair — then slides along that radius until the card
+is against the corner of the frame, or the section is against the opposite
+edge. What that spends is the hole, which goes off screen on most beats. It is
+the right thing to spend: the middle of the ring is the one part of the
+picture that is not about the section being read.
+
+The scale has to be solved for rather than computed, because the card is a
+fixed size in pixels and so its size *in the picture* depends on the scale
+that framing the picture produces. Iterating from the scale the section alone
+would take — an upper bound, since the card only ever makes the box bigger —
+walks down to the fixed point in a few steps. A small section therefore ends
+up read closer than a large one, and `max_zoom` is a rail rather than a
+working limit: the card is a fixed share of the frame however small the
+section is, so a sliver can never fill the frame with flat colour.
+
+**Keep labels short.** How big the ring can be is decided by the longest
+label: the words are a fixed size in pixels, and they have to fit between the
+ring and the edge of the frame, so a long name costs every section its radius.
+Names go around the ring, explanations go in the `note`.
+
+**The reading order is the ranking.** Sorted largest first, the clip answers
+"what is using the memory?" in the order the question is asked. `"sort":
+false` keeps the order you wrote, for a breakdown where that order means
+something — a timeline, a pipeline, a call stack.
+
+**Nothing but the ring is ever carried by the camera.** The labels around the
+figure and the card beside a section are laid out once in frame coordinates
+and cut in and out over `LABEL_FADE` (0.22s) around the camera — up only while
+it is sitting still, gone before it starts again. Laid out in the world
+instead, a zoom deals six labels outwards across the frame and off it, which
+the eye reads as *the labels* doing something at the one moment the camera is
+what is supposed to be moving. There is no frame in which a label or a card is
+both visible and in the wrong place.
+
+The camera also pulls back a little over the middle of every travel rather
+than sliding flat across: two sections on opposite sides of the ring are a
+long way apart once you are close to one, and lifting away and settling again
+puts the whole ring back on screen at the midpoint — which is where a reader
+who has lost their place gets it back. A little, because the travel is short:
+a deep arc crossed in half a second is a lurch rather than a lift.
+
 ## Storyboards
 
-`lib/render.py` holds both. `Renderer` is one `frame(n)` driven by `phase(t)`,
-mapping a timestamp to `(zoom, annotation index, pan, outro)`.
+`lib/render.py` holds all three. `Renderer` is one `frame(n)` driven by
+`phase(t)`, mapping a timestamp to `(zoom, annotation index, pan, outro)`.
 `ExplodeRenderer` builds an explicit list of segments up front, each with a
 camera move and a caption; a piece's position at any moment is its own rect
 plus every ancestor's offset, weighted by how far that ancestor has come
-apart.
+apart. `DonutRenderer` builds a segment list the same way, but draws rather
+than crops: a camera is `(pixels per world unit, x, y)`, the ring is a set of
+annulus polygons drawn at that scale into a supersampled layer, and a scale is
+interpolated in log space so that halfway between 1× and 4× is 2× rather than
+2.5×. Everything that is not the ring — labels, the total in the hole, the
+establishing caption, each section's card — is placed once in frame
+coordinates, by `_place_figure` and `_section_view`, and never moves. The header strip and the caption bar are `Furniture`, shared
+because two storyboards that draw the same frame separately draw it a couple
+of pixels apart; a donut wears the header only.

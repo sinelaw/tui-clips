@@ -1,0 +1,32 @@
+{
+  "name": "memory-breakdown",
+  "render": {
+    "size": [1080, 1080],
+    "fps": 60,
+    "title": "fresh 0.9 — resident memory, 40 buffers open",
+    "intro_caption": ["412 MB resident", "where it all went, largest first"],
+    "outro_caption": ["Three quarters is the parse",
+                      "trees, ropes and the server that reads them"],
+    "donut": {
+      "unit": "MB",
+      "total": "412 MB",
+      "total_label": "resident",
+      "thickness": 0.40,
+      "items": [
+        {"label": "Syntax trees", "value": 148,
+         "note": "one per open buffer, kept whole so an edit reparses a subtree"},
+        {"label": "Rope buffers", "value": 96,
+         "note": "chunked, so an insert copies a leaf and not a file"},
+        {"label": "LSP client", "value": 72,
+         "note": "a pending-request table and a mirror of every open doc"},
+        {"label": "Undo history", "value": 46,
+         "note": "capped by age, not by count — a long session pays for it"},
+        {"label": "Highlight cache", "value": 28,
+         "note": "memoised per viewport, dropped when a buffer scrolls out"},
+        {"label": "Everything else", "value": 22,
+         "note": "config, themes, the plugin host, the frame buffers"}
+      ]
+    }
+  },
+  "encode": {"crf": 18, "preset": "slow"}
+}
