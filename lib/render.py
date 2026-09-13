@@ -1993,8 +1993,11 @@ RING_FILL = 0.92
 # the establishing caption's two lines, and the air between them and the ring
 ESTAB_H = 104
 ESTAB_GAP = 44
-# how wide a card's description is allowed to run before it wraps
-CARD_TEXT = 340
+# How wide a card's description is allowed to run before it wraps. It has to
+# go up with the description's type: the note is set nearly as large as the
+# name above it, because it is the half of the card a reader has to actually
+# read, and at a narrow measure that size wraps a sentence into a column.
+CARD_TEXT = 470
 # How much air the camera leaves around a section *and its card*, which are
 # framed as one object. Little, because the card is most of the air already.
 SECTION_CONTEXT = 1.1
@@ -2194,7 +2197,7 @@ class DonutRenderer(Furniture):
         self.f_card = ImageFont.truetype(BOLD, int(34 * k))
         self.f_big = ImageFont.truetype(BOLD, int(52 * k))
         self.f_pct = ImageFont.truetype(MONO, int(24 * k))
-        self.f_note = ImageFont.truetype(MONO, int(23 * k))
+        self.f_note = ImageFont.truetype(MONO, int(29 * k))
         self._fonts: dict = {}
         # a description is the point of the card, so it is set between the
         # muted grey of a measurement and the full white of a headline
