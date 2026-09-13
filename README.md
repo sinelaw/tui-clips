@@ -799,6 +799,12 @@ Timings are `grow`, `intro`, `move`, `hold`, `regroup`, `outro`. Duration is
 `grow + intro + (move + hold) per visited item + regroup + outro`; six items at
 the defaults gives 28.1s. Set any to `0` to drop that beat.
 
+There is nothing to capture, so `--stills` and `--skip-capture` have nothing to
+do and a run is all render: about 40s for a `--draft`, a few minutes at full
+size. Every frame is drawn from scratch at three times the size and brought
+back down, which is what buys the arcs an edge that does not crawl — so the
+draft is where the framing gets checked, as it is for every other shape.
+
 **The numbers go on the section, the sentence goes in the bar.** The card
 pinned beside a section carries its name, its value and its share of the
 total — a share is read against the arc that is a picture of it, so that is
