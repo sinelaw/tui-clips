@@ -245,6 +245,31 @@ def test_donut_visits_every_section_once(tmp):
           f"duration is the sum of the beats ({r.total():.2f}s)")
 
 
+def test_donut_hold_is_per_item(tmp):
+    """a section with more to read gets longer to read it in.
+
+    `timing.hold` is the clip's dwell; an item's own `hold` overrides it, which
+    is what a three-line description on one section and two words on the next
+    needs. Everything else about the beat is unchanged -- it is the dwell that
+    varies, not the framing.
+    """
+    sp = donut_spec()
+    sp["render"]["donut"]["items"][0]["hold"] = 5.0
+    sp["render"]["donut"]["items"][2]["hold"] = 0.4
+    r = render.make(sp, {}, os.path.join(tmp, "f"))
+    holds = [(r.items[s["focus"]]["label"], s["dur"])
+             for s in r.timeline if s["kind"] == "hold"]
+    check(holds == [("Trees", 5.0), ("Ropes", r.t["hold"]), ("Rest", 0.4)],
+          f"each item dwells for its own hold, else the clip's ({holds})")
+    base = render.make(donut_spec(), {}, os.path.join(tmp, "f2"))
+    check(abs(r.total() - (base.total() - 2 * r.t["hold"] + 5.4)) < 1e-9,
+          f"and the clip is that much longer ({r.total():.2f}s vs "
+          f"{base.total():.2f}s)")
+    # the beat itself is the same beat: same camera, same card
+    check(r.section_view[0][0] == base.section_view[0][0],
+          "a longer hold does not re-frame the section")
+
+
 def test_donut_camera_closes_in_and_comes_back(tmp):
     """a section is read closer than the whole, the smaller the closer"""
     r = render.make(donut_spec(), {}, os.path.join(tmp, "f"))
