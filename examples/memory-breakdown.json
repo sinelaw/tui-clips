@@ -1,0 +1,40 @@
+{
+  "name": "memory-breakdown",
+  "render": {
+    "size": [1080, 1080],
+    "fps": 60,
+    "title": "fresh 0.9 — resident memory, 40 buffers open",
+    "intro_caption": ["412 MB resident", "where it all went, largest first"],
+    "outro_caption": ["Three quarters is the parse",
+                      "trees, ropes and the server that reads them"],
+    "timing": {"grow": 1.3, "intro": 2.2, "move": 0.95, "hold": 2.8,
+               "regroup": 1.0, "outro": 2.2},
+    "donut": {
+      "unit": "MB",
+      "total": "412 MB",
+      "total_label": "resident",
+      "thickness": 0.40,
+      "items": [
+        {"label": "Syntax trees", "value": 148,
+         "head": "Syntax trees cost the most",
+         "note": "one per buffer, kept whole so an edit reparses a subtree"},
+        {"label": "Rope buffers", "value": 96,
+         "head": "The text itself is second",
+         "note": "chunked, so an insert copies a leaf and not a file"},
+        {"label": "LSP client", "value": 72,
+         "head": "The language server's side of the wire",
+         "note": "one pending-request table and a mirror of every open doc"},
+        {"label": "Undo history", "value": 46,
+         "head": "Undo is unbounded on purpose",
+         "note": "capped by age, not by count — a long session pays for it"},
+        {"label": "Highlight cache", "value": 28,
+         "head": "Highlights are memoised per viewport",
+         "note": "dropped when a buffer scrolls out of every window"},
+        {"label": "Everything else", "value": 22,
+         "head": "The rest is small and dull",
+         "note": "config, themes, the plugin host, the frame buffers"}
+      ]
+    }
+  },
+  "encode": {"crf": 18, "preset": "slow"}
+}

@@ -4,6 +4,8 @@
 Two panes named `before` and `after` make a comparison clip; a single pane makes
 a solo clip, for a feature that has nothing to compare against. A spec with a
 `render.explode` section instead takes its one capture apart, piece by piece.
+A spec with a `render.donut` section films nothing at all: its picture is the
+numbers it carries, drawn as a ring and read one section at a time.
 
     tui-clip specs/thing.json                 # capture, render, encode
     tui-clip specs/thing.json --skip-capture  # reuse out/<name>/*.png
@@ -217,10 +219,14 @@ def main() -> None:
     if args.draft:
         draft(spec)
 
-    panes = list(spec["capture"]["panes"])
+    # A donut clip draws its own picture, so there is nothing to film and no
+    # terminal to film it in; every stage below that needs a capture is keyed
+    # off this being empty rather than off the mode, since "no panes" is the
+    # whole of what a captureless clip means to the pipeline.
+    panes = list(spec.get("capture", {}).get("panes", {}))
     captures = {p: os.path.join(outdir, f"{p}.png") for p in panes}
 
-    if not args.skip_capture:
+    if panes and not args.skip_capture:
         # Work on a copy in scratch: many TUIs keep per-directory session state,
         # and we must not disturb whatever the user has open for real.
         scratch = os.path.join(outdir, "scratch")
@@ -288,6 +294,9 @@ def main() -> None:
                 f"recording {rname!r} produced no frames in "
                 f"{run_dir(rname, panes[0], shots_dir)} (drop --skip-capture?)")
     if args.stills:
+        if not panes:
+            print(f"  {name} films nothing; there are no stills to check")
+            return
         for f in [*captures.values(), *shots.values()]:
             print(f)
         for rname, seq in runs.items():

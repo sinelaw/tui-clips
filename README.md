@@ -2,7 +2,8 @@
 
 Short annotated videos of a terminal program, from a JSON spec — two builds
 side by side, one build on its own, or one screen taken apart into the
-elements behind it.
+elements behind it. Or, when what you have to explain is a set of numbers
+rather than a screen, a donut the camera reads one section at a time.
 
 ## Quick start
 
@@ -19,7 +20,14 @@ touches the terminal or editor you have open.
 A spec goes stale when the program it films changes its layout, so specs live
 with the program, not here. The worked examples below are fresh's, in
 [`scripts/clips`](https://github.com/sinelaw/fresh/tree/master/scripts/clips);
-a spec path is any path, so yours can live wherever its subject does.
+a spec path is any path, so yours can live wherever its subject does. The one
+exception is a donut clip, which films nothing and so has nothing to go stale
+against — [`examples/memory-breakdown.json`](examples/memory-breakdown.json)
+is a complete one, and runs with no X and no terminal:
+
+```sh
+./bin/tui-clip examples/memory-breakdown.json --draft   # ~40s
+```
 
 About 75s: ~25s capturing, ~40s rendering frames, ~10s encoding. While
 iterating:
@@ -35,7 +43,7 @@ iterating:
 `tui-grid` overlays a numbered row/column grid on a capture. Annotation bands
 are written in those same cells, so you read the numbers straight off it.
 
-## Three shapes
+## Four shapes
 
 **Comparison** — panes named `before` and `after`. Both captures appear side by
 side, the BEFORE panel swipes out left, the AFTER zooms to full frame, then one
@@ -56,6 +64,19 @@ piece drawn over by another loses those pixels to a hole. A capture is flat, so
 an overlay's pixels sit in the image at the rows the things underneath occupy —
 cut those out as they are and every one of them carries a copy of the overlay
 away with it.
+
+**Donut** — no panes at all, and a `render.donut` section carrying the
+numbers. The ring draws itself in, stands as a labelled whole, and is then
+read one section at a time: the camera lands on the largest share, and pans
+and zooms to each next one down. See
+[`examples/memory-breakdown.json`](examples/memory-breakdown.json).
+
+The first three film a screen and annotate what is in it. This one has no
+screen to film: a memory breakdown, a startup-time budget, a size-on-disk
+report is a set of numbers, and the picture has to be drawn rather than
+captured. Which is what makes the camera free — every frame is drawn at the
+scale it is seen at, so a section can fill the frame as cleanly as the ring
+did, with none of the resampling a zoom into a screenshot pays for.
 
 ## What a screenshot is for
 
@@ -500,6 +521,11 @@ where the travel is `pan`, or `push` for a beat that asks for one; three
 annotations at the defaults gives 10.1s. Set any timing to `0` to drop that beat, or give one
 beat its own `hold` when it has more to show than the others.
 
+That is the spec for a clip that films something. A donut clip drops the whole
+`capture` section and swaps `render.annotations` for `render.donut` — `name`,
+`size`, `fps`, `title`, the captions, the theme and `encode` all mean the same
+things. See [Donut specs](#donut-specs).
+
 ## Framing a beat
 
 By default the camera fits the capture across the frame and travels only up and
@@ -739,11 +765,76 @@ the capture gets the real look without the run being able to write back over
 it. A `{"shot": "path"}` step takes a screenshot mid-sequence, which is how a
 capture and a dump of the same screen come out of one run.
 
+## Donut specs
+
+A donut clip has no `capture` section at all — nothing is filmed, and the
+picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
+`value`, and the one-line `note` that says what the thing *is*.
+
+```jsonc
+"donut": {
+  "unit": "MB",                // appended to every value
+  "total": "412 MB",           // what stands in the hole; default is the sum
+  "total_label": "resident",
+  "sort": true,                // rank by value, largest first (the default)
+  "start_angle": -90,          // 12 o'clock, read clockwise
+  "thickness": 0.40,           // the band, as a fraction of the outer radius
+  "gap": 1.0,                  // degrees of ground between two sections
+  "max_zoom": 3.4,             // how close a sliver may be read
+  "dim": 0.68,                 // how far the other sections go back
+  "items": [
+    {"label": "Syntax trees",  // beside the ring, and on the card
+     "value": 148,
+     "note": "one per buffer, kept whole so an edit reparses a subtree",
+     "head": "Syntax trees cost the most",  // the caption bar; default: label
+     "display": "148.2 MB",    // optional; overrides value + unit
+     "color": [74, 222, 128],  // optional; else the next colour off the ramp
+     "hold": 3.4,              // optional; else timing.hold
+     "visit": false}           // drawn and labelled, but never dwelt on
+  ]
+}
+```
+
+Timings are `grow`, `intro`, `move`, `hold`, `regroup`, `outro`. Duration is
+`grow + intro + (move + hold) per visited item + regroup + outro`; six items at
+the defaults gives 28.1s. Set any to `0` to drop that beat.
+
+**The numbers go on the section, the sentence goes in the bar.** The card
+pinned beside a section carries its name, its value and its share of the
+total — a share is read against the arc that is a picture of it, so that is
+where it belongs. Everything else the clip has to say is a sentence, and
+sentences go where every other shape in this tool puts them.
+
+**Keep labels short.** How big the ring can be is decided by the longest
+label: the words are a fixed size in pixels, and they have to fit between the
+ring and the edge of the frame, so a long name costs every section its radius.
+Names go around the ring, explanations go in the `note`.
+
+**The reading order is the ranking.** Sorted largest first, the clip answers
+"what is using the memory?" in the order the question is asked. `"sort":
+false` keeps the order you wrote, for a breakdown where that order means
+something — a timeline, a pipeline, a call stack.
+
+Two things the camera does that are worth knowing. It never closes in further
+than `max_zoom`, because a 2% sliver framed on its own terms is one flat
+colour from edge to edge, which says nothing and loses the ring it was cut
+from. And it pulls back over the middle of every travel rather than sliding
+flat across: two sections on opposite sides of the ring are a long way apart
+once you are close to one, and lifting away and settling again puts the whole
+ring back on screen at the midpoint — which is where a reader who has lost
+their place gets it back.
+
 ## Storyboards
 
-`lib/render.py` holds both. `Renderer` is one `frame(n)` driven by `phase(t)`,
-mapping a timestamp to `(zoom, annotation index, pan, outro)`.
+`lib/render.py` holds all three. `Renderer` is one `frame(n)` driven by
+`phase(t)`, mapping a timestamp to `(zoom, annotation index, pan, outro)`.
 `ExplodeRenderer` builds an explicit list of segments up front, each with a
 camera move and a caption; a piece's position at any moment is its own rect
 plus every ancestor's offset, weighted by how far that ancestor has come
-apart.
+apart. `DonutRenderer` builds a segment list the same way, but draws rather
+than crops: a camera is `(pixels per world unit, x, y)`, the ring is a set of
+annulus polygons drawn at that scale into a supersampled layer, and a scale is
+interpolated in log space so that halfway between 1× and 4× is 2× rather than
+2.5×. The header strip and the caption bar are the last two — `Furniture` —
+because two storyboards that draw the same frame separately draw it a couple
+of pixels apart.

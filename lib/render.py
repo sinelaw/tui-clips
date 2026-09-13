@@ -81,7 +81,7 @@ DEFAULT_THEME = {
 DEFAULT_TIMING = {"title": 0.0, "intro": 2.1, "zoom": 0.8, "hold": 1.8,
                   "pan": 0.4, "push": 0.9, "outro": 1.0}
 DEFAULT_LABELS = {"before": "BEFORE", "after": "AFTER", "solo": "NEW",
-                  "explode": "ANATOMY"}
+                  "explode": "ANATOMY", "donut": "BREAKDOWN"}
 
 
 def cap_of(a: dict):
@@ -108,8 +108,15 @@ def fade_c(c, a: int):
 
 
 def mode_of(spec: dict) -> str:
-    """'explode' when the spec says how to take the capture apart, else
-    'compare' when it captures both a before and an after, else 'solo'"""
+    """'donut' when the spec carries its own data rather than a screen, else
+    'explode' when it says how to take the capture apart, else 'compare' when
+    it captures both a before and an after, else 'solo'"""
+    if spec.get("render", {}).get("donut"):
+        if spec.get("capture", {}).get("panes"):
+            raise SystemExit(
+                "a donut clip draws its own picture from render.donut.items; "
+                "it films nothing, so capture.panes must be absent")
+        return "donut"
     panes = spec["capture"]["panes"]
     if spec.get("render", {}).get("explode"):
         if len(panes) != 1:
@@ -137,7 +144,10 @@ def make(spec: dict, captures: dict[str, str], outdir: str,
          shots: dict[str, str] | None = None,
          runs: dict[str, list[str]] | None = None):
     """the renderer this spec asks for"""
-    if mode_of(spec) == "explode":
+    mode = mode_of(spec)
+    if mode == "donut":
+        return DonutRenderer(spec, outdir)
+    if mode == "explode":
         return ExplodeRenderer(spec, captures, outdir)
     return Renderer(spec, captures, outdir, shots, runs)
 
@@ -1231,6 +1241,72 @@ class Renderer:
 
 
 # ---------------------------------------------------------------------------
+# the frame everything is read inside
+# ---------------------------------------------------------------------------
+
+
+class Furniture:
+    """The header strip and the caption bar, and the cross-fade between two
+    captions.
+
+    A word and a title along the top, a headline and a line of detail along
+    the bottom: that is the frame a clip is read inside, and it is the same
+    frame whatever the storyboard puts in the middle. Written out once per
+    storyboard it is written out once per storyboard *wrong* -- the two drift
+    a couple of pixels and a colour apart, and nobody notices until they are
+    seen one after the other.
+
+    A host supplies `th`, `W`, `H`, `uk` (canvas height over 1080), `header_h`,
+    `cap_y`, `lead`, `title`, and the `f_hdr`/`f_meta`/`f_cap`/`f_sub` fonts.
+    """
+
+    def caption(self, seg: dict, u: float, prev: dict | None):
+        """-> (head, sub, alpha) for this moment.
+
+        A caption that changes does not cut: the old words go out and the new
+        ones come in over the front of the segment, so the swap rides the
+        camera move rather than landing on top of it.
+        """
+        head, sub, ca = seg["head"], seg["sub"], 255
+        xf = min(0.38, seg["dur"] / 2) / max(seg["dur"], 1e-6)
+        if prev and (prev["head"], prev["sub"]) != (head, sub) and u < xf:
+            v = u / xf
+            if v < 0.5:
+                head, sub, ca = prev["head"], prev["sub"], int(255 * (1 - v / 0.5))
+            else:
+                ca = int(255 * ((v - 0.5) / 0.5))
+        return head, sub, ca
+
+    def furniture(self, d, head: str, sub: str, ca: int, accent=None) -> None:
+        """paint the bars over whatever ran under them.
+
+        `accent` is the colour of the moment -- the theme's `after` unless the
+        beat has a colour of its own, which a donut section does.
+        """
+        th, W, H, k = self.th, self.W, self.H, self.uk
+        accent = accent or th["after"]
+        m = int(32 * k)
+        d.rectangle([0, 0, W, self.header_h], fill=th["bg"])
+        d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
+        d.rectangle([0, self.cap_y, W, self.cap_y + max(1, int(3 * k))],
+                    fill=fade_c(accent, 200))
+        if self.lead:
+            d.text((m, self.header_h / 2), self.lead, font=self.f_hdr,
+                   fill=accent, anchor="lm")
+            d.text((W - m, self.header_h / 2 + 2 * k), self.title,
+                   font=self.f_meta, fill=th["muted"], anchor="rm")
+        else:
+            d.text((m, self.header_h / 2), self.title, font=self.f_meta,
+                   fill=th["muted"], anchor="lm")
+        d.rectangle([m, self.cap_y + 44 * k, int(40 * k), self.cap_y + 86 * k],
+                    fill=fade_c(accent, ca))
+        d.text((60 * k, self.cap_y + 50 * k), head, font=self.f_cap,
+               fill=fade_c(th["fg"], ca), anchor="lm")
+        d.text((60 * k, self.cap_y + 94 * k), sub, font=self.f_sub,
+               fill=fade_c(th["muted"], ca), anchor="lm")
+
+
+# ---------------------------------------------------------------------------
 # explode: one capture, taken apart
 # ---------------------------------------------------------------------------
 
@@ -1452,7 +1528,7 @@ class Piece:
             yield from c.walk()
 
 
-class ExplodeRenderer:
+class ExplodeRenderer(Furniture):
     """A capture taken apart into its annotated rects, one beat per piece.
 
         intro    the capture whole
@@ -1872,35 +1948,602 @@ class ExplodeRenderer:
                          1.0, focus, labels)
         self._chips(cv, d, labels)
 
-        # header and caption bars, painted over whatever ran under them
-        m = int(32 * self.uk)
-        d.rectangle([0, 0, W, self.header_h], fill=th["bg"])
-        d.rectangle([0, self.cap_y, W, H], fill=th["caption_bg"])
-        d.rectangle([0, self.cap_y, W, self.cap_y + max(1, int(3 * self.uk))],
-                    fill=fade_c(th["after"], 200))
-        if self.lead:
-            d.text((m, self.header_h / 2), self.lead, font=self.f_hdr,
-                   fill=th["after"], anchor="lm")
-            d.text((W - m, self.header_h / 2 + 2 * self.uk), self.title,
-                   font=self.f_meta, fill=th["muted"], anchor="rm")
-        else:
-            d.text((m, self.header_h / 2), self.title, font=self.f_meta,
-                   fill=th["muted"], anchor="lm")
+        self.furniture(d, *self.caption(s, u, prev))
+        return cv
 
-        head, sub, ca = s["head"], s["sub"], 255
-        xf = min(0.38, s["dur"] / 2) / max(s["dur"], 1e-6)
-        if prev and (prev["head"], prev["sub"]) != (head, sub) and u < xf:
-            v = u / xf
-            if v < 0.5:
-                head, sub, ca = prev["head"], prev["sub"], int(255 * (1 - v / 0.5))
+
+# ---------------------------------------------------------------------------
+# donut: a ranked breakdown, read one section at a time
+# ---------------------------------------------------------------------------
+
+DEFAULT_DONUT_TIMING = {
+    "grow": 1.2, "intro": 2.0, "move": 0.9, "hold": 2.8,
+    "regroup": 0.9, "outro": 1.8,
+}
+
+# World x where a label's words start, the ring's outer radius being 1. The
+# scale of the establishing shot follows from it: the words are a fixed size in
+# pixels, so the longest of them is what decides how big the ring can be and
+# still have its labels inside the frame. Solving it that way round is the only
+# way that terminates -- measuring the words needs a scale, and the scale is
+# what the measurement was for.
+LABEL_X = 1.30
+# what the ring alone is allowed of the viewport's height, for the case where
+# the labels are short enough that the width stops being the constraint
+RING_FILL = 0.92
+# How much room the camera leaves around one section. Enough that the
+# neighbours stay in frame: a section read with nothing else on screen is a
+# coloured shape, and the whole claim of a breakdown is the comparison.
+SECTION_CONTEXT = 1.5
+# A 2% sliver framed on its own terms is one flat colour from edge to edge,
+# which says nothing and loses the ring it was cut from. Past this the camera
+# stops closing in and lets the sliver be small.
+MAX_ZOOM = 3.4
+# How far the camera pulls back over the middle of a travel. Two sections on
+# opposite sides of the ring are a long way apart once you are close to one,
+# and a flat pan between them is a wall of colour going past; lifting away and
+# settling again is the move a hand makes, and it puts the whole ring back on
+# screen in the middle of it, which is where the reader re-finds themselves.
+PULLBACK = 0.20
+# how far the section being read slides out of the ring
+POP = 0.045
+# what is left of a section nobody is looking at
+DONUT_DIM = 0.68
+# The ring is drawn at this multiple and brought back down. PIL has no
+# antialiasing, and a hard-edged arc that moves is a crawling staircase --
+# on a curve it is the one artefact a viewer will see before the data.
+DONUT_SS = 3
+
+# A ranked breakdown is categorical, not a scale: neighbouring sections have
+# to be told apart at a glance, so the ramp steps around the wheel rather than
+# along a gradient. The last is grey, which is where an "other" lands.
+DONUT_RAMP = [
+    [74, 222, 128], [56, 189, 248], [251, 191, 36], [167, 139, 250],
+    [244, 114, 182], [45, 212, 191], [248, 113, 113], [148, 163, 184],
+]
+
+
+def _fmt_value(v: float) -> str:
+    """a number as a person would write it"""
+    if abs(v - round(v)) < 1e-9:
+        return f"{round(v):,}"
+    return f"{v:,.1f}"
+
+
+def _fmt_share(f: float) -> str:
+    """a share as a percentage, with a decimal only where it earns one"""
+    pct = f * 100
+    return f"{pct:.1f}%" if pct < 10 else f"{pct:.0f}%"
+
+
+def _overlap(a, b) -> float:
+    """the area two (x0, y0, x1, y1) rects have in common"""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 0 and h > 0 else 0.0
+
+
+def _bbox(pts):
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _stack(wants: list[float], lh: float, top: float, bot: float) -> list[float]:
+    """slide a column of labels apart until none of them overlap.
+
+    `wants[i]` is where label i would like to sit, in ascending order. Each is
+    pushed down until it clears the one above, then the whole column is pulled
+    back inside (top, bot) from whichever end it ran past. Two passes, because
+    pulling the bottom back in can push the top out again.
+    """
+    ys = list(wants)
+    for i in range(1, len(ys)):
+        ys[i] = max(ys[i], ys[i - 1] + lh)
+    if ys and ys[-1] > bot:
+        ys[-1] = bot
+        for i in range(len(ys) - 2, -1, -1):
+            ys[i] = min(ys[i], ys[i + 1] - lh)
+    if ys and ys[0] < top:
+        ys[0] = top
+        for i in range(1, len(ys)):
+            ys[i] = max(ys[i], ys[i - 1] + lh)
+    return ys
+
+
+class DonutRenderer(Furniture):
+    """A ranked breakdown as a donut, read one section at a time.
+
+        grow     the ring draws itself in, clockwise from the start angle
+        intro    the whole figure, every section labelled with its share
+        move     a pan-and-zoom onto the next section, pulling back over the
+                 middle of the travel so the ring is never lost
+        hold     the section framed, slid out of the ring and lit while the
+                 rest is dimmed, with its label, value and share beside it
+        regroup  the camera comes back to the whole
+        outro    the end caption
+
+    Nothing is filmed. A breakdown is a set of numbers, not a screen, so the
+    picture is drawn from the data in the spec -- which is also why the camera
+    can go as close as it likes: every frame is drawn at the scale it is seen
+    at, and a section fills the frame as cleanly as the ring did.
+
+    The reading order is the ranking. Sorted by value unless the spec says
+    otherwise, the clip walks from the biggest share down, which is the order
+    a person asking "what is using the memory?" wants the answer in.
+    """
+
+    def __init__(self, spec: dict, outdir: str):
+        r = spec["render"]
+        dn = r["donut"]
+        self.spec, self.r, self.outdir = spec, r, outdir
+        self.mode = "donut"
+
+        self.W, self.H = r.get("size", [1080, 1080])
+        self.fps = int(r.get("fps", 60))
+        self.uk = self.H / 1080
+        self.header_h = int(r.get("header_height", 96) * self.uk)
+        self.cap_h = int(r.get("caption_height", 132) * self.uk)
+        self.cap_y = self.H - self.cap_h
+        self.vp = (0, self.header_h, self.W, self.cap_y - self.header_h)
+
+        th = dict(DEFAULT_THEME)
+        th.update(r.get("theme", {}))
+        self.th = {k: tuple(v) for k, v in th.items()}
+        self.t = dict(DEFAULT_DONUT_TIMING)
+        self.t.update(r.get("timing", {}))
+
+        self.unit = dn.get("unit", "")
+        self.start = float(dn.get("start_angle", -90))
+        self.inner = 1.0 - float(dn.get("thickness", 0.40))
+        if not 0.0 < self.inner < 1.0:
+            raise SystemExit("render.donut.thickness must be between 0 and 1")
+        self.gap = float(dn.get("gap", 1.0))
+        self.max_zoom = float(dn.get("max_zoom", MAX_ZOOM))
+        self.dim = float(dn.get("dim", DONUT_DIM))
+
+        items = [dict(d) for d in dn.get("items", [])]
+        if not items:
+            raise SystemExit("render.donut.items is empty; nothing to break down")
+        for d in items:
+            if "label" not in d or "value" not in d:
+                raise SystemExit(
+                    f"every donut item needs a `label` and a `value`; got {d!r}")
+            d["value"] = float(d["value"])
+            if d["value"] < 0:
+                raise SystemExit(
+                    f"donut item {d['label']!r} has a negative value; a section "
+                    "of a whole cannot be less than nothing")
+        if dn.get("sort", True):
+            items.sort(key=lambda d: -d["value"])
+        total = sum(d["value"] for d in items)
+        if total <= 0:
+            raise SystemExit("the donut's values sum to zero; nothing to draw")
+
+        # angles accumulate clockwise from `start_angle`, which is where the
+        # ring is read from -- 12 o'clock by default, as a clock is
+        acc = self.start
+        for i, d in enumerate(items):
+            d["share"] = d["value"] / total
+            d["a0"], d["a1"] = acc, acc + 360.0 * d["share"]
+            acc = d["a1"]
+            d["color"] = tuple(d.get("color", DONUT_RAMP[i % len(DONUT_RAMP)]))
+            d["head"] = d.get("head", d["label"])
+            d["sub"] = d.get("sub", d.get("note", ""))
+            d["display"] = d.get("display") or (
+                f"{_fmt_value(d['value'])} {self.unit}".strip())
+        self.items = items
+        self.visit = [i for i, d in enumerate(items) if d.get("visit", True)]
+
+        self.total_txt = dn.get("total", f"{_fmt_value(total)} {self.unit}".strip())
+        self.total_label = dn.get("total_label", "")
+
+        self.cap_intro = r.get("intro_caption", ["", ""])
+        self.cap_outro = r.get("outro_caption", ["", ""])
+        lb = dict(DEFAULT_LABELS)
+        lb.update(r.get("labels", {}))
+        self.lead = lb["donut"]
+        self.title = r.get("title", "")
+
+        k = self.uk
+        self.f_hdr = ImageFont.truetype(BOLD, int(38 * k))
+        self.f_meta = ImageFont.truetype(MONO, int(24 * k))
+        self.f_cap = ImageFont.truetype(BOLD, int(42 * k))
+        self.f_sub = ImageFont.truetype(MONO, int(24 * k))
+        self.f_lab = ImageFont.truetype(BOLD, int(26 * k))
+        self.f_val = ImageFont.truetype(MONO, int(21 * k))
+        self.f_card = ImageFont.truetype(BOLD, int(36 * k))
+        self.f_big = ImageFont.truetype(BOLD, int(58 * k))
+        self.f_pct = ImageFont.truetype(MONO, int(26 * k))
+        self._fonts: dict = {}
+
+        self._fit()
+        self._layout_labels()
+        self.timeline = self._timeline()
+
+    # -- camera -------------------------------------------------------------
+    def _cam_for(self, box, context: float):
+        """-> (canvas px per world unit, world x, world y) framing `box`"""
+        w = max(1e-6, box[2] - box[0]) * context
+        h = max(1e-6, box[3] - box[1]) * context
+        s = min(self.vp[2] / w, self.vp[3] / h)
+        return (s, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def _pt(self, cam, x: float, y: float):
+        s, cx, cy = cam
+        return (self.vp[0] + self.vp[2] / 2 + (x - cx) * s,
+                self.vp[1] + self.vp[3] / 2 + (y - cy) * s)
+
+    def _cam_lerp(self, c0, c1, p: float, arc: float = 0.0):
+        """the camera part-way from c0 to c1.
+
+        The scale is interpolated in log space: halfway between 1x and 4x is
+        2x, not 2.5x, and a linear scale spends most of a travel already close
+        in. `arc` lifts the camera away over the middle and brings it back.
+        """
+        s = math.exp(lerp(math.log(c0[0]), math.log(c1[0]), p))
+        s *= 1.0 - arc * math.sin(math.pi * p)
+        return (s, lerp(c0[1], c1[1], p), lerp(c0[2], c1[2], p))
+
+    # -- geometry -----------------------------------------------------------
+    def _arc(self, a0: float, a1: float, rad: float, off=(0.0, 0.0)):
+        """points along an arc, at about a degree and a half apart"""
+        n = max(2, int(abs(a1 - a0) / 1.5) + 2)
+        out = []
+        for j in range(n):
+            t = math.radians(a0 + (a1 - a0) * j / (n - 1))
+            out.append((math.cos(t) * rad + off[0], math.sin(t) * rad + off[1]))
+        return out
+
+    def _wedge(self, i: int, sweep: float = 1.0, pop: float = 0.0):
+        """item i as an annulus sector, in world points, or None.
+
+        The gap between sections is taken out of the section's own ends rather
+        than drawn between them, so what separates two sections is the ground
+        -- which is the only separator that stays a separator at every zoom.
+        """
+        d = self.items[i]
+        a0, a1 = d["a0"], d["a1"]
+        g = min(self.gap, (a1 - a0) * 0.45)
+        b0, b1 = a0 + g / 2, min(a1 - g / 2, self.start + 360.0 * sweep)
+        if b1 <= b0:
+            return None
+        mid = math.radians((a0 + a1) / 2)
+        off = (math.cos(mid) * pop, math.sin(mid) * pop)
+        return (self._arc(b0, b1, 1.0, off)
+                + self._arc(b1, b0, self.inner, off))
+
+    def _section_cam(self, i: int):
+        """the camera that reads item i, never closer than `max_zoom`"""
+        cam = self._cam_for(_bbox(self._wedge(i, pop=POP)), SECTION_CONTEXT)
+        return (min(cam[0], self.cam_whole[0] * self.max_zoom), cam[1], cam[2])
+
+    def _edge(self, i: int, out: int):
+        """the middle of item i's outer rim, or of its inner one.
+
+        Where a leader starts. Starting it at the middle of the band instead
+        runs the line straight across the section it is labelling, which is
+        the one place on the frame a line has no business being.
+        """
+        d = self.items[i]
+        mid = math.radians((d["a0"] + d["a1"]) / 2)
+        rad = (1.0 if out > 0 else self.inner) + POP
+        return math.cos(mid) * rad, math.sin(mid) * rad
+
+    # -- labels around the ring ---------------------------------------------
+    def _fit(self) -> None:
+        """how big the ring can be and still have its labels in the frame.
+
+        The longest label decides it. A smaller ring with every name legible
+        beats a bigger one with two of them running off the side -- and where
+        the names are short it is the viewport's height that binds instead, so
+        a breakdown of three things is not held to the size a breakdown of ten
+        would need.
+        """
+        margin = int(30 * self.uk)
+        need = max(max(self.f_lab.getlength(d["label"]),
+                       self.f_val.getlength(self._sub_label(d)))
+                   for d in self.items)
+        by_width = (self.W / 2 - margin - need - 12 * self.uk) / LABEL_X
+        by_height = self.vp[3] / 2 * RING_FILL
+        self.cam_whole = (max(40.0, min(by_width, by_height)), 0.0, 0.0)
+
+    @staticmethod
+    def _sub_label(item: dict) -> str:
+        return f'{item["display"]}  ·  {_fmt_share(item["share"])}'
+
+    def _layout_labels(self) -> None:
+        """where each label's leader elbows and where its words sit, in world.
+
+        World, not canvas, so the labels travel with the ring: zoom in and they
+        spread with it and leave the frame, which is what they should do -- by
+        then they have been replaced by the card. Only the type stays a fixed
+        size, because type that scales with a 3x zoom is a headline.
+        """
+        s = self.cam_whole[0]
+        lh = (64 * self.uk) / s           # two lines of label, in world units
+        # The column runs the height of the viewport, not the height of the
+        # ring: a label pushed clear of its neighbours has to have somewhere to
+        # go, and the frame is taller than the figure whenever the labels were
+        # what set the figure's size.
+        half = (self.vp[3] / 2 - 24 * self.uk) / s
+        top, bot = -half + lh / 2, half - lh / 2
+        self.labels: dict[int, dict] = {}
+        for side in (1, -1):
+            rows = []
+            for i, d in enumerate(self.items):
+                mid = math.radians((d["a0"] + d["a1"]) / 2)
+                if (1 if math.cos(mid) >= 0 else -1) != side:
+                    continue
+                rows.append((math.sin(mid) * 1.20, i, mid))
+            rows.sort()
+            ys = _stack([y for y, _, _ in rows], lh, top, bot)
+            for (_, i, mid), y in zip(rows, ys):
+                self.labels[i] = {
+                    "side": side,
+                    "anchor": (math.cos(mid) * 1.02, math.sin(mid) * 1.02),
+                    "elbow": (math.cos(mid) * 1.17, math.sin(mid) * 1.17),
+                    "stub": (side * LABEL_X, y),
+                    "text": (side * (LABEL_X + 0.05), y),
+                }
+
+    # -- storyboard ---------------------------------------------------------
+    def _timeline(self) -> list[dict]:
+        T = self.t
+        segs: list[dict] = []
+
+        def seg(kind, dur, cam0, cam1, focus=None, head="", sub="",
+                sweep0=1.0, sweep1=1.0, lab=None, arc=0.0):
+            """`lab` is where the labels end up; they start wherever the last
+            segment left them, so dropping a beat cannot make them pop on."""
+            if dur <= 0:
+                return
+            at = segs[-1]["lab1"] if segs else 0.0
+            segs.append({"kind": kind, "dur": float(dur), "cam0": cam0,
+                         "cam1": cam1, "focus": focus, "head": head,
+                         "sub": sub, "sweep0": sweep0, "sweep1": sweep1,
+                         "lab0": at, "lab1": at if lab is None else lab,
+                         "arc": arc})
+
+        whole = self.cam_whole
+        seg("grow", T["grow"], whole, whole, head=self.cap_intro[0],
+            sub=self.cap_intro[1], sweep0=0.0, sweep1=1.0, lab=0.0)
+        seg("intro", T["intro"], whole, whole, head=self.cap_intro[0],
+            sub=self.cap_intro[1], lab=1.0)
+
+        cam = whole
+        for i in self.visit:
+            d = self.items[i]
+            to = self._section_cam(i)
+            seg("move", T["move"], cam, to, focus=i, head=d["head"],
+                sub=d["sub"], lab=0.0, arc=PULLBACK)
+            seg("hold", float(d.get("hold", T["hold"])), to, to, focus=i,
+                head=d["head"], sub=d["sub"])
+            cam = to
+        seg("regroup", T["regroup"], cam, whole, head=self.cap_outro[0],
+            sub=self.cap_outro[1], lab=1.0, arc=PULLBACK / 2)
+        seg("outro", T["outro"], whole, whole, head=self.cap_outro[0],
+            sub=self.cap_outro[1], lab=1.0)
+        if not segs:
+            raise SystemExit("every donut timing is zero; nothing to render")
+        return segs
+
+    def total(self) -> float:
+        return sum(s["dur"] for s in self.timeline)
+
+    def at(self, t: float):
+        acc = 0.0
+        for i, s in enumerate(self.timeline):
+            if t < acc + s["dur"] or i == len(self.timeline) - 1:
+                u = (t - acc) / s["dur"] if s["dur"] > 0 else 1.0
+                return s, max(0.0, min(1.0, u)), (self.timeline[i - 1] if i else None)
+            acc += s["dur"]
+        raise AssertionError("empty timeline")
+
+    # -- painting -----------------------------------------------------------
+    def _font(self, px: int):
+        px = max(6, int(px))
+        if px not in self._fonts:
+            if len(self._fonts) > 64:
+                self._fonts.clear()
+            self._fonts[px] = ImageFont.truetype(BOLD, px)
+        return self._fonts[px]
+
+    def _lit(self, i: int, focus: list) -> float:
+        """1 where the beat is, falling off for everything else"""
+        if not focus:
+            return 1.0
+        rest = max(0.0, 1.0 - sum(w for _, w in focus))
+        return max(rest, max((w for j, w in focus if j == i), default=0.0))
+
+    def _ring(self, cv, cam, sweep: float, focus: list) -> None:
+        """the ring, drawn at `DONUT_SS` and brought back down.
+
+        Only the viewport is oversampled: it is the only part of the frame the
+        ring is allowed into, and a full-canvas layer at three times the size
+        is most of a render's cost for rows that end up under a caption bar.
+        """
+        ss, (vx, vy, vw, vh) = DONUT_SS, self.vp
+        lay = Image.new("RGBA", (vw * ss, vh * ss), (0, 0, 0, 0))
+        ld = ImageDraw.Draw(lay)
+        s, cx, cy = cam
+        ox = (vw / 2 - cx * s) * ss
+        oy = (vh / 2 - cy * s) * ss
+        for i, d in enumerate(self.items):
+            lit = self._lit(i, focus)
+            pts = self._wedge(i, sweep, POP * lit)
+            if pts is None:
+                continue
+            col = tuple(int(lerp(d["color"][c], self.th["bg"][c],
+                                 self.dim * (1.0 - lit))) for c in range(3))
+            ld.polygon([(ox + x * s * ss, oy + y * s * ss) for x, y in pts],
+                       fill=(*col, 255))
+        # `reduce` is a box average over exactly `ss` by `ss` pixels, which is
+        # what supersampling wants and what a resampling filter only
+        # approximates -- and it is several times quicker, which at a frame per
+        # sixtieth of a second is the difference between a render and a wait.
+        lay = lay.reduce(ss)
+        cv.paste(lay, (vx, vy), lay)
+
+    def _hole(self, d, cam, alpha: float) -> None:
+        """what the ring is a breakdown *of*, in the middle of it.
+
+        Sized off the camera rather than the canvas: it is a thing inside the
+        ring, so it grows and goes when the ring does.
+        """
+        if alpha < 0.02 or not self.total_txt:
+            return
+        s = cam[0]
+        x, y = self._pt(cam, 0.0, 0.0)
+        a = int(255 * alpha)
+        d.text((x, y - 0.06 * s), self.total_txt, font=self._font(0.23 * s),
+               fill=fade_c(self.th["fg"], a), anchor="mm")
+        if self.total_label:
+            d.text((x, y + 0.14 * s), self.total_label,
+                   font=self._font(0.095 * s),
+                   fill=fade_c(self.th["muted"], a), anchor="mm")
+
+    def _labels(self, d, cam, sweep: float, alpha: float) -> None:
+        """leader, name and number, for every section at once"""
+        if alpha < 0.02 or sweep < 0.999:
+            return
+        a = int(255 * alpha)
+        for i, item in enumerate(self.items):
+            L = self.labels[i]
+            pts = [self._pt(cam, *L[k]) for k in ("anchor", "elbow", "stub")]
+            pts.append(self._pt(cam, *L["text"]))
+            d.line(pts, fill=fade_c(item["color"], int(a * 0.75)),
+                   width=max(1, int(2 * self.uk)))
+            tx, ty = pts[-1]
+            anc = "lm" if L["side"] > 0 else "rm"
+            pad = 10 * self.uk * L["side"]
+            d.text((tx + pad, ty - 15 * self.uk), item["label"], font=self.f_lab,
+                   fill=fade_c(self.th["fg"], a), anchor=anc)
+            d.text((tx + pad, ty + 16 * self.uk), self._sub_label(item),
+                   font=self.f_val, fill=fade_c(item["color"], int(a * 0.92)),
+                   anchor=anc)
+
+    def _card(self, cv, d, i: int, cam, alpha: float) -> None:
+        """the section's own annotation, pinned beside it.
+
+        The numbers go here and the sentence goes in the caption bar: the card
+        sits on the thing it measures, where a share is read against the arc it
+        describes, and the bar is where this clip says everything else it says.
+        """
+        if alpha < 0.02:
+            return
+        item = self.items[i]
+        k, a = self.uk, int(255 * alpha)
+        pad, gap = int(26 * k), int(20 * k)
+        lines = [(item["label"], self.f_card, self.th["fg"]),
+                 (item["display"], self.f_big, item["color"]),
+                 (f'{_fmt_share(item["share"])} of {self.total_txt}',
+                  self.f_pct, self.th["muted"])]
+        # Sized on the ink, not on the font: a card set from the ascent of
+        # three faces has a band of nothing under each line, and three lines
+        # of nothing is how a readout becomes a poster.
+        w = int(max(f.getlength(t) for t, f, _ in lines)) + 2 * pad + int(10 * k)
+        ink = [f.getbbox(t) for t, f, _ in lines]
+        hs = [b[3] - b[1] for b in ink]
+        h = sum(hs) + 2 * pad + 2 * int(13 * k)
+
+        # The card is dealt along the radius, out of the ring or into the hole:
+        # those are the two directions that are empty whatever the camera is
+        # doing, because they are the two directions the ring is not. Dealt
+        # sideways instead it lands on the section it is annotating, which at
+        # a zoom that fills the frame with one arc is most of the frame.
+        mid = math.radians((item["a0"] + item["a1"]) / 2)
+        reach = math.hypot(w, h) / 2 + gap
+        wedge = _bbox([self._pt(cam, *q) for q in self._wedge(i, pop=POP)])
+        best = None
+        for out in (1, -1):
+            ex, ey = self._pt(cam, *self._edge(i, out))
+            bx, by = self._place(ex + math.cos(mid) * reach * out - w / 2,
+                                 ey + math.sin(mid) * reach * out - h / 2, w, h)
+            over = _overlap((bx, by, bx + w, by + h), wedge)
+            if best is None or over < best[0]:
+                best = (over, (bx, by), (ex, ey))
+        x, y = best[1]
+        ax, ay = best[2]
+
+        edge = x + w if x + w < ax else (x if x > ax else ax)
+        d.line([(ax, ay), (edge, max(y + int(20 * k),
+                                     min(y + h - int(20 * k), ay)))],
+               fill=fade_c(item["color"], int(a * 0.8)),
+               width=max(1, int(2 * k)))
+
+        card = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(card)
+        cd.rounded_rectangle([0, 0, w - 1, h - 1], radius=int(14 * k),
+                             fill=(*self.th["caption_bg"], int(a * 0.94)),
+                             outline=(*item["color"], int(a * 0.5)),
+                             width=max(1, int(1 * k)))
+        cd.rectangle([0, int(14 * k), max(2, int(5 * k)), h - int(14 * k)],
+                     fill=(*item["color"], a))
+        ty = pad
+        for (txt, font, col), b in zip(lines, ink):
+            # `text` puts the ascender top at `ty`, and the ascent of a face is
+            # mostly headroom for accents nothing here uses. Backing off by
+            # where the ink actually starts is what makes the height above the
+            # height the card is.
+            cd.text((pad + int(10 * k), ty - b[1]), txt, font=font,
+                    fill=(*col, a))
+            ty += b[3] - b[1] + int(13 * k)
+        cv.paste(card, (int(x), int(y)), card)
+
+    def _place(self, x: float, y: float, w: int, h: int):
+        """`x, y` brought inside the viewport"""
+        vx, vy, vw, vh = self.vp
+        m = int(28 * self.uk)
+        return (max(vx + m, min(vx + vw - w - m, x)),
+                max(vy + m, min(vy + vh - h - m, y)))
+
+    # -- main ---------------------------------------------------------------
+    def run(self) -> int:
+        os.makedirs(self.outdir, exist_ok=True)
+        for f in os.listdir(self.outdir):
+            os.remove(os.path.join(self.outdir, f))
+        nf = int(round(self.total() * self.fps))
+        for n in range(nf):
+            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+        return nf
+
+    def frame(self, n: int) -> Image.Image:
+        s, u, prev = self.at(n / self.fps)
+        p = ease(u)
+        cam = self._cam_lerp(s["cam0"], s["cam1"], p, s["arc"])
+        sweep = lerp(s["sweep0"], s["sweep1"], p)
+        lab = lerp(s["lab0"], s["lab1"], p)
+
+        # The dim follows the camera, so it arrives with the section rather
+        # than snapping on ahead of it; on the way out it releases the same way.
+        focus = []
+        if s["focus"] is not None:
+            if s["kind"] == "move":
+                if prev and prev["focus"] is not None:
+                    focus.append((prev["focus"], 1.0 - p))
+                focus.append((s["focus"], p))
             else:
-                ca = int(255 * ((v - 0.5) / 0.5))
-        d.rectangle([m, self.cap_y + 44 * self.uk, int(40 * self.uk),
-                     self.cap_y + 86 * self.uk], fill=fade_c(th["after"], ca))
-        # `ty` never existed here -- this is the caption bar, which starts at
-        # cap_y, as the rule above and the sub below it both already said.
-        d.text((60 * self.uk, self.cap_y + 50 * self.uk), head, font=self.f_cap,
-               fill=fade_c(th["fg"], ca), anchor="lm")
-        d.text((60 * self.uk, self.cap_y + 94 * self.uk), sub, font=self.f_sub,
-               fill=fade_c(th["muted"], ca), anchor="lm")
+                focus.append((s["focus"], 1.0))
+        elif prev and prev["focus"] is not None:
+            focus.append((prev["focus"], 1.0 - p))
+
+        cv = Image.new("RGB", (self.W, self.H), self.th["bg"])
+        d = ImageDraw.Draw(cv)
+        self._ring(cv, cam, sweep, focus)
+        self._hole(d, cam, lab)
+        self._labels(d, cam, sweep, lab)
+        # One card at a time: two of them dissolving into each other at
+        # different places on the frame is a smear, so the old one leaves over
+        # the first half of a travel and the new one arrives over the second.
+        for i, w in focus:
+            if w > 0.5:
+                self._card(cv, d, i, cam, (w - 0.5) * 2)
+
+        # The word along the top and the tick in the bar take the colour of
+        # whichever section the frame is mostly about, so the swap lands with
+        # the caption rather than a travel ahead of it.
+        accent = (self.items[max(focus, key=lambda f: f[1])[0]]["color"]
+                  if focus else self.th["after"])
+        self.furniture(d, *self.caption(s, u, prev), accent=accent)
         return cv
