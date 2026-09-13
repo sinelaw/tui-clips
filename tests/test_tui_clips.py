@@ -274,7 +274,7 @@ def test_donut_labels_do_not_overlap(tmp):
     # clears by its own spacing can still have the name of one sitting on the
     # number of the one above
     def block(i):
-        y = r._pt(r.cam_whole, *r.labels[i]["text"])[1]
+        y = r.centre[1] + r.labels[i]["text"][1]
         return (y - 15 * r.uk - r.f_lab.size / 2,
                 y + 16 * r.uk + r.f_val.size / 2)
     for side in (1, -1):
@@ -283,15 +283,73 @@ def test_donut_labels_do_not_overlap(tmp):
         check(worst >= 0,
               f"side {side}: no label is drawn over the next "
               f"(closest pair clears by {worst:.1f}px)")
-        check(col[0][0] >= r.header_h and col[-1][1] <= r.cap_y,
-              f"side {side}: the column stays between the bars")
+        check(col[0][0] >= r.vp[1] and col[-1][1] <= r.estab_y,
+              f"side {side}: the column stays clear of the header and the "
+              "establishing caption")
     # and the whole figure came down to make room for the long names
     short = render.make(donut_spec(donut={"items": [
         {"label": "A", "value": 1}, {"label": "B", "value": 1}]}), {},
         os.path.join(tmp, "f2"))
-    check(short.cam_whole[0] > r.cam_whole[0],
-          f"short labels buy a bigger ring ({short.cam_whole[0]:.0f} vs "
-          f"{r.cam_whole[0]:.0f})")
+    check(short.scale > r.scale,
+          f"short labels buy a bigger ring ({short.scale:.0f} vs "
+          f"{r.scale:.0f})")
+
+
+def test_donut_labels_never_move(tmp):
+    """the labels are cut in and out around the camera, never carried by it.
+
+    Laid out in world coordinates they travel with the ring, so a zoom deals
+    six of them outwards across the frame and off it -- movement the eye reads
+    as the labels doing something, at the one moment the camera is what is
+    supposed to be moving. So: they are only ever up while the camera is
+    sitting on the whole figure, and while they are up they are in one place.
+    """
+    r = render.make(donut_spec(), {}, os.path.join(tmp, "f"))
+    seen, moving = 0, 0
+    for n in range(int(round(r.total() * r.fps))):
+        s, u, _ = r.at(n / r.fps)
+        a = r.label_alpha(s, u, s is r.timeline[-1])
+        cam = r._cam_lerp(s["cam0"], s["cam1"], render.ease(u), s["arc"])
+        off = max(abs(cam[k] - r.cam_whole[k]) for k in range(3)) > 1e-6
+        seen += a > 0
+        moving += a > 0 and off
+    check(seen > 0, f"the labels are up for {seen} frames")
+    check(moving == 0,
+          f"and for none of them is the camera off the whole figure ({moving})")
+    # a label's position is a constant, not a function of the frame
+    check(all(isinstance(v, tuple) and len(v) == 2
+              for L in r.labels.values()
+              for k, v in L.items() if k != "side"),
+          "every label point is a fixed canvas offset")
+
+
+def test_donut_card_carries_the_description(tmp):
+    """the note is on the card, beside the section, not in a bar at the bottom.
+
+    The bar is gone: a reader whose eye is in the middle of the frame does not
+    read a strip along the bottom of it.
+    """
+    note = "one per open buffer, kept whole so an edit reparses a subtree"
+    sp = donut_spec()
+    sp["render"]["donut"]["items"][0]["note"] = note
+    r = render.make(sp, {}, os.path.join(tmp, "f"))
+    check(not hasattr(r, "cap_y"), "a donut has no caption bar to draw into")
+    check(r.vp[1] + r.vp[3] == r.H,
+          "and the picture runs to the bottom of the frame")
+    wrapped = r._wrap(note, r.f_note, render.CARD_TEXT * r.uk)
+    check(len(wrapped) > 1 and " ".join(wrapped) == note,
+          f"the note wraps to {len(wrapped)} lines and loses nothing")
+    check(all(r.f_note.getlength(ln) <= render.CARD_TEXT * r.uk
+              for ln in wrapped), "no wrapped line runs past the card")
+    # mid-hold on section 0, the words are on screen
+    mid = int((r.t["grow"] + r.t["intro"] + r.t["move"] + r.t["hold"] / 2)
+              * r.fps)
+    with_note = r.frame(mid)
+    sp2 = donut_spec()
+    sp2["render"]["donut"]["items"][0]["note"] = ""
+    r2 = render.make(sp2, {}, os.path.join(tmp, "f2"))
+    check(ImageChops.difference(with_note, r2.frame(mid)).getbbox() is not None,
+          "the card is drawn differently for a section that has a note")
 
 
 def test_donut_renders_every_beat(tmp):
@@ -309,9 +367,9 @@ def test_donut_renders_every_beat(tmp):
     # thing that normally stands in it would answer this question the wrong
     # way round.
     r2 = render.make(donut_spec(donut={"total": ""}), {}, os.path.join(tmp, "f2"))
-    mid = r2.frame(int((r2.t["grow"] + r2.t["intro"] * 0.9) * r2.fps))
-    cx, cy = r2._pt(r2.cam_whole, 0.0, 0.0)
-    band = (1.0 + r2.inner) / 2 * r2.cam_whole[0]
+    mid = r2.frame(int((r2.t["grow"] + r2.t["intro"] * 0.5) * r2.fps))
+    cx, cy = r2.centre
+    band = (1.0 + r2.inner) / 2 * r2.scale
     check(mid.getpixel((int(cx), int(cy))) == r2.th["bg"], "the hole is a hole")
     check(mid.getpixel((int(cx + band), int(cy))) != r2.th["bg"],
           "and the band around it is not")

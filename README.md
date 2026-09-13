@@ -786,7 +786,6 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
     {"label": "Syntax trees",  // beside the ring, and on the card
      "value": 148,
      "note": "one per buffer, kept whole so an edit reparses a subtree",
-     "head": "Syntax trees cost the most",  // the caption bar; default: label
      "display": "148.2 MB",    // optional; overrides value + unit
      "color": [74, 222, 128],  // optional; else the next colour off the ramp
      "hold": 3.4,              // optional; else timing.hold
@@ -797,7 +796,7 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
 
 Timings are `grow`, `intro`, `move`, `hold`, `regroup`, `outro`. Duration is
 `grow + intro + (move + hold) per visited item + regroup + outro`; six items at
-the defaults gives 28.1s. Set any to `0` to drop that beat.
+the defaults gives 27.3s. Set any to `0` to drop that beat.
 
 There is nothing to capture, so `--stills` and `--skip-capture` have nothing to
 do and a run is all render: about 40s for a `--draft`, a few minutes at full
@@ -805,11 +804,17 @@ size. Every frame is drawn from scratch at three times the size and brought
 back down, which is what buys the arcs an edge that does not crawl — so the
 draft is where the framing gets checked, as it is for every other shape.
 
-**The numbers go on the section, the sentence goes in the bar.** The card
-pinned beside a section carries its name, its value and its share of the
-total — a share is read against the arc that is a picture of it, so that is
-where it belongs. Everything else the clip has to say is a sentence, and
-sentences go where every other shape in this tool puts them.
+**There is no caption bar.** The other shapes put a headline and a line of
+detail along the bottom of the frame. A donut does not: the camera has just
+spent half a second putting one section in the middle of the frame, which is
+where the reader is looking, and a strip of words along the bottom is a second
+place to look for what the thing in the middle is already about. It gets read
+after the picture has been understood, if at all.
+
+So an item's whole annotation — name, value, share, and the `note` that says
+what the thing *is* — is on the card pinned beside its section. The only words
+that go under the ring are `intro_caption` and `outro_caption`, centred
+directly beneath it, and they are only up while the camera is still.
 
 **Keep labels short.** How big the ring can be is decided by the longest
 label: the words are a fixed size in pixels, and they have to fit between the
@@ -821,14 +826,24 @@ Names go around the ring, explanations go in the `note`.
 false` keeps the order you wrote, for a breakdown where that order means
 something — a timeline, a pipeline, a call stack.
 
-Two things the camera does that are worth knowing. It never closes in further
-than `max_zoom`, because a 2% sliver framed on its own terms is one flat
-colour from edge to edge, which says nothing and loses the ring it was cut
-from. And it pulls back over the middle of every travel rather than sliding
-flat across: two sections on opposite sides of the ring are a long way apart
-once you are close to one, and lifting away and settling again puts the whole
-ring back on screen at the midpoint — which is where a reader who has lost
-their place gets it back.
+**The labels are cut, not carried.** They belong to the establishing shot, not
+to the ring: they are laid out once in frame coordinates and are only ever on
+screen while the camera is sitting still on the whole figure, arriving and
+leaving over `LABEL_FADE` (0.22s) at either end of it. Laid out in the world
+instead they travel with the ring, and a zoom deals six labels outwards across
+the frame and off it — movement the eye reads as *the labels* doing something,
+at the one moment the camera is what is supposed to be moving. There is no
+frame in which a label is both visible and in the wrong place.
+
+Two more things the camera does. It never closes in further than `max_zoom`,
+because a 2% sliver framed on its own terms is one flat colour from edge to
+edge, which says nothing and loses the ring it was cut from. And it pulls back
+a little over the middle of every travel rather than sliding flat across: two
+sections on opposite sides of the ring are a long way apart once you are close
+to one, and lifting away and settling again puts the whole ring back on screen
+at the midpoint — which is where a reader who has lost their place gets it
+back. A little, because the travel is short: a deep arc crossed in half a
+second is a lurch rather than a lift.
 
 ## Storyboards
 
@@ -841,6 +856,8 @@ apart. `DonutRenderer` builds a segment list the same way, but draws rather
 than crops: a camera is `(pixels per world unit, x, y)`, the ring is a set of
 annulus polygons drawn at that scale into a supersampled layer, and a scale is
 interpolated in log space so that halfway between 1× and 4× is 2× rather than
-2.5×. The header strip and the caption bar are the last two — `Furniture` —
+2.5×. Everything that is not the ring — labels, the total in the hole, the
+establishing caption — is placed once in frame coordinates by `_place_figure`
+and never moves. The header strip and the caption bar are `Furniture`, shared
 because two storyboards that draw the same frame separately draw it a couple
-of pixels apart.
+of pixels apart; a donut wears the header only.
