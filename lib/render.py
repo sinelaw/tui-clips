@@ -2455,16 +2455,23 @@ class DonutRenderer(Furniture):
         mid = math.radians((item["a0"] + item["a1"]) / 2)
         reach = math.hypot(w, h) / 2 + gap
         wedge = _bbox([self._pt(cam, *q) for q in self._wedge(i, pop=POP)])
-        best = None
+        spots = []
         for out in (1, -1):
             ex, ey = self._pt(cam, *self._edge(i, out))
-            bx, by = self._place(ex + math.cos(mid) * reach * out - w / 2,
-                                 ey + math.sin(mid) * reach * out - h / 2, w, h)
-            over = _overlap((bx, by, bx + w, by + h), wedge)
-            if best is None or over < best[0]:
-                best = (over, (bx, by), (ex, ey))
-        x, y = best[1]
-        ax, ay = best[2]
+            spots.append((self._place(ex + math.cos(mid) * reach * out - w / 2,
+                                      ey + math.sin(mid) * reach * out - h / 2,
+                                      w, h), (ex, ey)))
+        # A section wide enough to reach both ways across the frame leaves no
+        # radius clear, and a corner is then the only empty part of the picture.
+        # Tried last and only taken when it is strictly clearer, so the ordinary
+        # case stays the ordinary case.
+        for cx in (self.vp[0], self.vp[0] + self.vp[2] - w):
+            for cy in (self.vp[1], self.vp[1] + self.vp[3] - h):
+                spots.append((self._place(cx, cy, w, h),
+                              self._pt(cam, *self._edge(i, 1))))
+        (x, y), (ax, ay) = min(
+            spots, key=lambda sp: _overlap((sp[0][0], sp[0][1], sp[0][0] + w,
+                                            sp[0][1] + h), wedge))
 
         edge = x + w if x + w < ax else (x if x > ax else ax)
         d.line([(ax, ay), (edge, max(y + int(20 * k),
