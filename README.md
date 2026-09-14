@@ -26,7 +26,8 @@ against — [`examples/memory-breakdown.json`](examples/memory-breakdown.json)
 is a complete one, and runs with no X and no terminal:
 
 ```sh
-./bin/tui-clip examples/memory-breakdown.json --draft   # ~40s
+./bin/tui-clip examples/memory-breakdown.json --draft        # ~40s
+./bin/tui-clip examples/memory-breakdown-ansi.json --draft   # the same, printed
 ```
 
 About 75s: ~25s capturing, ~40s rendering frames, ~10s encoding. While
@@ -66,7 +67,8 @@ cut those out as they are and every one of them carries a copy of the overlay
 away with it.
 
 **Donut** — no panes at all, and a `render.donut` section carrying the
-numbers. The ring draws itself in, stands as a labelled whole, and is then
+numbers, drawn smoothly or printed into a character grid. The ring draws
+itself in, stands as a labelled whole, and is then
 read one section at a time: the camera lands on the largest share, and pans
 and zooms to each next one down. See
 [`examples/memory-breakdown.json`](examples/memory-breakdown.json).
@@ -780,6 +782,7 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
   "start_angle": -90,          // 12 o'clock, read clockwise
   "thickness": 0.40,           // the band, as a fraction of the outer radius
   "gap": 1.0,                  // degrees of ground between two sections
+  "style": "ansi",             // optional; "smooth" (the default) or "ansi"
   "max_zoom": 7.0,             // a rail on how close a section may be read
   "dim": 0.68,                 // how far the other sections go back
   "items": [
@@ -860,6 +863,74 @@ puts the whole ring back on screen at the midpoint — which is where a reader
 who has lost their place gets it back. A little, because the travel is short:
 a deep arc crossed in half a second is a lurch rather than a lift.
 
+## The printed donut
+
+This repo is about terminals, and a donut drawn with polygons is the one shape
+in it that does not look like one. `"style": "ansi"` prints it instead: the
+ring becomes a grid of characters, the card becomes a box-drawn panel titled in
+its own top rule, the header becomes a status line in reverse video, and the
+two places that want bigger type get a double-height line — DECDHL, the only
+way a real terminal ever had two sizes at once. See
+[`examples/memory-breakdown-ansi.json`](examples/memory-breakdown-ansi.json).
+
+```jsonc
+"donut": {
+  "style": "ansi",
+  "charset": "unicode",      // a named set, or the characters themselves
+  "cell": 14,                // the type cell's width; its height is twice it
+  "focus": [36, 8],          // the chart's cell at either end of the rack focus
+  "focus_time": [0.42, 0.28],
+  "sharp_at": 0.70,          // past this the grid dissolves into the real thing
+  "scanline": 0.88,
+  "bloom": 0.40,
+  "items": [ ... ]           // everything else is as it is for a smooth donut
+}
+```
+
+It is a subclass rather than a second renderer, and that is the design: the
+storyboard, the camera solve, the card placement and the label layout are the
+ones a smooth donut uses, and only the drawing is replaced.
+
+**The chart is dithered, not classified.** The ring is drawn the ordinary way
+first — the polygons the smooth renderer already gets right — and *that* is
+reduced to the grid. There is no per-cell "which section covers me?" left to
+get wrong, which is what a boundary cell, and a section slid out of the ring,
+both get wrong. Alpha is coverage, the colour channels are the sections
+premultiplied by it, and the residual is error-diffused Floyd–Steinberg.
+
+**A character is matched on where its ink is, not how much.** Each one is
+rendered at the cell size, reduced to a 4×6 grid of its own ink and compared
+against the cell's. Ranking a set by darkness and picking by darkness alone is
+the classic trick and it is exactly right for `shades`, where every character
+is uniform — but `'` and `_` ink about the same share of a cell in completely
+different parts of it, and `/` and `\` are one glyph mirrored. Matching the
+grid is what lets an edge running down-and-left pick `/` and a flat bottom pick
+`_`. The named sets are `shades`, `dots`, `ascii` (all 95 printable), `ansi`
+(CP437's shades, blocks and box rules), `blocks` and `unicode`; `charset` also
+takes a bare string, since a set is only ever a string — every character in it
+is measured off the font at the size it will be printed.
+
+**The colour is snapped to the ring's own palette**, by the *direction* of the
+premultiplied colour rather than by dividing it back out. Dividing divides by a
+small number exactly where the rounding on it is worst, and a faint edge cell
+comes back grey, or some hue the chart does not contain.
+
+**The rack focus is why it moves well.** A beat the camera holds still for
+pulls the grid from 36px cells down to 8px, and then past `sharp_at` the grid
+stops getting finer and dissolves into the picture it was standing for —
+running the cell down to a single pixel arrives at the same place and costs a
+hundred times as much. Before the camera moves it runs backwards. Travels and
+the opening sweep are coarse throughout, which is not decoration: a *moving*
+picture on a fixed grid crawls, because cells pop between glyphs as the shape
+slides under them and the eye reads the popping rather than the motion. Nothing
+is ever both sharp and in motion, so there is nothing to crawl.
+
+It costs about 0.3–0.6s a frame against the smooth style's 0.1s, nearly all of
+it in the dither, so a full-size clip is closer to ten minutes than three.
+Glyph masks and match results are cached per cell size — a font hints its
+glyphs differently small than large, and the focus runs through a dozen sizes —
+and the caches outlive the frame, so only the first one pays.
+
 ## Storyboards
 
 `lib/render.py` holds all three. `Renderer` is one `frame(n)` driven by
@@ -875,4 +946,6 @@ interpolated in log space so that halfway between 1× and 4× is 2× rather than
 establishing caption, each section's card — is placed once in frame
 coordinates, by `_place_figure` and `_section_view`, and never moves. The header strip and the caption bar are `Furniture`, shared
 because two storyboards that draw the same frame separately draw it a couple
-of pixels apart; a donut wears the header only.
+of pixels apart; a donut wears the header only. `AnsiDonutRenderer` subclasses
+`DonutRenderer` and replaces only its drawing methods, which is why the two
+donut styles cannot drift apart on anything but ink.
