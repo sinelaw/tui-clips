@@ -60,16 +60,36 @@ RING_W = 5
 # for. Five levels plus error diffusion resolves an edge better than thirty-six
 # glyphs matched cell by cell did, and it cannot invent a shape that is not
 # there, which is where the gaps and the floating slivers came from.
-# Any string works: the density of each character is measured off the font and
-# the set is sorted by it, so a set is just an alphabet and a preference. The
-# second argument to the script picks one.
+# The alphabet. Any string works: each character is rendered at the cell size
+# and reduced to an NX-by-NY grid of its own ink, so a set is just a string and
+# a preference. The third argument to the script picks one.
+#
+# The first pass ranked characters by how much of a cell they ink and chose by
+# darkness alone. That is libcaca's classic trick and it is exactly right for
+# ` ░▒▓█`, where every character is uniform and only the amount differs -- and
+# it throws away the whole reason to use ASCII. `'` and `_` ink about the same
+# share of a cell in completely different parts of it; `/` and `\` are one
+# glyph mirrored. Matching the grid rather than its mean is what lets an edge
+# running down-and-left pick `/`, a flat bottom pick `_`, and a top corner
+# pick `'`.
+NX, NY = 4, 6
+
 RAMPS = {
+    # uniform sets: only the amount differs, so matching degenerates to a ramp
     "shades":  " ░▒▓█",
-    "ansi":    " ·░▒▓█",
-    "ascii":   " .:-=+*#%@",
-    "blocks":  " ▁▂▃▄▅▆▇█",
-    "unicode": " ░▒▓█▁▂▃▄▅▆▇▏▎▍▌▋▊▉▖▗▘▝▚▞",
     "dots":    " .·:∘∙•●",
+    # every printable ASCII character, which is the point -- the matcher gets
+    # to use the ones with ink in a corner, along an edge, or on a diagonal
+    "ascii":   (" !\"#$%&'()*+,-./0123456789:;<=>?@"
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+                "abcdefghijklmnopqrstuvwxyz{|}~"),
+    # what an ANSI artist actually had: CP437's shades, blocks and box rules
+    "ansi":    " ░▒▓█▀▄▌▐─│┌┐└┘├┤┬┴┼═║╔╗╚╝▬■·.:*+",
+    # the block families on their own, which tile without a join
+    "blocks":  " ▁▂▃▄▅▆▇█▏▎▍▌▋▊▉▖▗▘▝▚▞▙▛▜▟▀▐",
+    # everything the font has that is shaped like part of a cell
+    "unicode": (" ░▒▓█▀▄▌▐▁▂▃▅▆▇▏▎▍▋▊▉▖▗▘▝▚▞▙▛▜▟"
+                "◢◣◤◥◺◿◹◸─│┌┐└┘╱╲╳▲▼◀▶●◗◖"),
 }
 
 NOTE_COLS = 30              # a card's description, wrapped in columns
@@ -125,6 +145,7 @@ class AnsiDonut(render.DonutRenderer):
         self.ramp = RAMPS[ramp]
         self._tiles: dict = {}
         self._masks: list = []
+        self._match: dict = {}
         self._scan = None
         self._cv = None
         self._lit_cells: list = []
@@ -137,23 +158,41 @@ class AnsiDonut(render.DonutRenderer):
         self._build_masks()
 
     def _build_masks(self) -> None:
-        """how much of a cell each character of the ramp inks.
+        """each character of the set as an NX-by-NY grid of its own ink.
 
-        Measured off the rendered glyph rather than assumed: a font's idea of
-        how dark its medium shade is is the only one that matters, because it
-        is the one that will be on the screen.
+        Measured off the rendered glyph rather than assumed from its name: a
+        font's idea of where its medium shade puts ink, and of how far down a
+        comma sits, is the only one that matters -- it is the one that will be
+        on the screen.
         """
         w, h = int(self.rcw), int(self.rch)
         for g in self.ramp:
             im = Image.new("L", (w, h), 0)
             if g != " ":
                 ImageDraw.Draw(im).text((0, 0), g, font=self.fring, fill=255)
-            self._masks.append((g, sum(im.tobytes()) / (255.0 * w * h)))
-        self._masks.sort(key=lambda t: t[1])
+            cells = [v / 255.0 for v in im.resize((NX, NY), Image.BOX).tobytes()]
+            self._masks.append((g, cells, sum(cells) / len(cells)))
 
-    def _pick(self, want: float):
-        """-> (character, how much of a cell it actually inks)"""
-        return min(self._masks, key=lambda t: abs(t[1] - want))
+    def _pick(self, want: list, key):
+        """-> (character, how much of a cell it inks) for this coverage grid.
+
+        Cached on a coarsely quantised grid. There are more patterns in
+        principle than anyone could enumerate; on a real frame there are a few
+        thousand, because every cell that is neither empty nor full is an edge
+        and edges repeat -- and the cache outlives the frame, so the second one
+        is nearly all hits.
+        """
+        if key not in self._match:
+            best, pick = None, (" ", 0.0)
+            for g, m, dens in self._masks:
+                e = 0.0
+                for a, b in zip(want, m):
+                    d = a - b
+                    e += d * d
+                if best is None or e < best:
+                    best, pick = e, (g, dens)
+            self._match[key] = pick
+        return self._match[key]
 
     def _fit(self) -> None:
         """the first thing `super().__init__` calls after the fonts exist, so
@@ -306,8 +345,13 @@ class AnsiDonut(render.DonutRenderer):
         full = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
         full.paste(self._smooth(cam, sweep, focus), (self.vp[0], self.vp[1]))
         cells = full.resize((self.rcols, self.rrows), Image.BOX)
-        alpha = cells.getchannel("A").tobytes()
         rgb = cells.convert("RGB").tobytes()
+        # ... and again at sub-cell resolution, which is what says *where* in
+        # each cell the ink goes. One resize in C, rather than a sampling loop
+        # in Python -- and it is a reduction of a correct picture, so unlike
+        # the geometry sampling it replaced it cannot misread a boundary.
+        sw = self.rcols * NX
+        sub = full.resize((sw, self.rrows * NY), Image.BOX).getchannel("A").tobytes()
 
         # Floyd-Steinberg, one row of error ahead of the cursor and one below.
         # The error is what makes five levels enough: a cell that wanted 0.6
@@ -334,13 +378,22 @@ class AnsiDonut(render.DonutRenderer):
             here, below = below, [0.0] * (self.rcols + 2)
             for c in range(self.rcols):
                 k = r * self.rcols + c
-                a = alpha[k] / 255.0
+                grid_ = []
+                for y in range(NY):
+                    row = (r * NY + y) * sw + c * NX
+                    grid_ += sub[row:row + NX]
+                a = sum(grid_) / (255.0 * NX * NY)
                 if a < INK:
                     here[c + 1] = 0.0           # nothing here: drop the error
                     continue
-                want = min(1.0, max(0.0, a + here[c + 1]))
-                ch, dens = self._pick(want)
-                e = want - dens
+                # the diffused error is a debt on the whole cell, so it is
+                # carried by every sub-cell alike -- it says "this cell owes
+                # the picture a little more ink", not "the shape was different"
+                d = here[c + 1]
+                want = [min(1.0, max(0.0, v / 255.0 + d)) for v in grid_]
+                key = tuple(int(v * 3.99) for v in want)
+                ch, dens = self._pick(want, key)
+                e = sum(want) / len(want) - dens
                 here[c + 2] += e * 7 / 16
                 below[c] += e * 3 / 16
                 below[c + 1] += e * 5 / 16
@@ -511,15 +564,15 @@ class AnsiDonut(render.DonutRenderer):
 def main():
     out = sys.argv[1]
     cell = int(sys.argv[2]) if len(sys.argv) > 2 else RING_W
-    ramp = sys.argv[3] if len(sys.argv) > 3 else "shades"
+    ramp = sys.argv[3] if len(sys.argv) > 3 else "unicode"
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(ROOT, "examples/memory-breakdown.json")) as fh:
         spec = json.load(fh)
     r = AnsiDonut(spec, out, cell, ramp)
     print(f"  ring {cell}x{cell * 2}px -> {r.rcols}x{r.rrows} characters; "
           f"type {CELL_W}x{CELL_H}px -> {r.cols}x{r.rows}")
-    print(f"  ramp {ramp!r}: "
-          + " ".join(f"{g}={d:.2f}" for g, d in r._masks))
+    print(f"  ramp {ramp!r}: {len(r.ramp)} characters, "
+          f"{NX}x{NY} sub-cells each")
     acc, picks = 0.0, {}
     for s in r.timeline:
         if s["kind"] == "intro":
