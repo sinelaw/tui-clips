@@ -19,6 +19,7 @@ import bisect
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 
@@ -99,6 +100,16 @@ NOTE_COLS = 30              # a card's description, wrapped in columns
 # other direction.
 INK = 0.004
 PANEL_A = 232               # how opaque a card's panel is over the ring
+
+# The rack focus. The ring resolves out of a coarse grid into a fine one and
+# then out of the grid altogether, and runs backwards before the camera moves.
+# It is doing two jobs: it is the only thing in the clip that says "this is a
+# terminal drawing something" rather than "this is a picture of a terminal",
+# and it hides the one weakness of a character grid, which is that a *moving*
+# picture on a fixed grid crawls. Nothing is ever both sharp and in motion.
+COARSE, FINE = 36, 8        # the cell at either end of the focus
+SHARP_AT = 0.70             # past this the grid dissolves into the real thing
+FOCUS_IN, FOCUS_OUT = 0.42, 0.28
 SCANLINE = 0.88             # how far every second row is taken down
 BLOOM = 0.40                # how much blurred light the lit section adds back
 GLOW_PX = 9                 # how far the phosphor spreads
@@ -137,43 +148,52 @@ class AnsiDonut(render.DonutRenderer):
         # here and measure in cells.
         uk = spec["render"].get("size", [1080, 1080])[1] / 1080
         self.tcw, self.tch = CELL_W * uk, CELL_H * uk
-        self.rcw, self.rch = ring * uk, ring * 2 * uk
         px = int(CELL_W / 0.6023 * uk)    # the size whose advance is one cell
         self.ftype = ImageFont.truetype(render.MONO, px)
         self.fbig = ImageFont.truetype(render.MONO, px * 2)
-        self.fring = ImageFont.truetype(render.MONO, int(ring / 0.6023 * uk))
         self.ramp = RAMPS[ramp]
         self._tiles: dict = {}
-        self._masks: list = []
+        self._masks: dict = {}
         self._match: dict = {}
+        self._fonts: dict = {}
+        self._sharp = 1.0
         self._scan = None
         self._cv = None
         self._lit_cells: list = []
         super().__init__(spec, outdir)
         self.cols = int(self.W / self.tcw) + 1
         self.rows = int(self.H / self.tch) + 1
-        self.rcols = int(self.W / self.rcw) + 1
-        self.rrows = int(self.H / self.rch) + 1
         self._ends = [d["a1"] for d in self.items]
-        self._build_masks()
 
-    def _build_masks(self) -> None:
+    def _font_for(self, cell: int):
+        if cell not in self._fonts:
+            self._fonts[cell] = ImageFont.truetype(
+                render.MONO, max(4, int(cell / 0.6023)))
+        return self._fonts[cell]
+
+    def _masks_for(self, cell: int):
         """each character of the set as an NX-by-NY grid of its own ink.
 
         Measured off the rendered glyph rather than assumed from its name: a
         font's idea of where its medium shade puts ink, and of how far down a
         comma sits, is the only one that matters -- it is the one that will be
-        on the screen.
+        on the screen. And it is measured per cell size, because a font hints
+        its glyphs differently small than large, and the focus runs through a
+        dozen sizes.
         """
-        w, h = int(self.rcw), int(self.rch)
-        for g in self.ramp:
-            im = Image.new("L", (w, h), 0)
-            if g != " ":
-                ImageDraw.Draw(im).text((0, 0), g, font=self.fring, fill=255)
-            cells = [v / 255.0 for v in im.resize((NX, NY), Image.BOX).tobytes()]
-            self._masks.append((g, cells, sum(cells) / len(cells)))
+        if cell not in self._masks:
+            out, font = [], self._font_for(cell)
+            for g in self.ramp:
+                im = Image.new("L", (cell, cell * 2), 0)
+                if g != " ":
+                    ImageDraw.Draw(im).text((0, 0), g, font=font, fill=255)
+                grid = [v / 255.0
+                        for v in im.resize((NX, NY), Image.BOX).tobytes()]
+                out.append((g, grid, sum(grid) / len(grid)))
+            self._masks[cell] = out
+        return self._masks[cell]
 
-    def _pick(self, want: list, key):
+    def _pick(self, cell: int, want: list, key):
         """-> (character, how much of a cell it inks) for this coverage grid.
 
         Cached on a coarsely quantised grid. There are more patterns in
@@ -182,9 +202,10 @@ class AnsiDonut(render.DonutRenderer):
         and edges repeat -- and the cache outlives the frame, so the second one
         is nearly all hits.
         """
+        key = (cell, key)
         if key not in self._match:
             best, pick = None, (" ", 0.0)
-            for g, m, dens in self._masks:
+            for g, m, dens in self._masks_for(cell):
                 e = 0.0
                 for a, b in zip(want, m):
                     d = a - b
@@ -337,88 +358,131 @@ class AnsiDonut(render.DonutRenderer):
                        fill=(*col, 255))
         return lay.reduce(ss)
 
+    def _lit_mask(self, cam, sweep, focus):
+        """where the section being read is, for the phosphor to glow through.
+
+        Drawn from the wedges rather than collected from the cells, because
+        there are no cells once the focus has pulled all the way in.
+        """
+        m = Image.new("L", (self.W, self.H), 0)
+        if not focus:
+            return None
+        md = ImageDraw.Draw(m)
+        s, cx, cy = cam
+        ox = self.vp[0] + self.vp[2] / 2 - cx * s
+        oy = self.vp[1] + self.vp[3] / 2 - cy * s
+        hit = False
+        for i, d in enumerate(self.items):
+            lit = self._lit(i, focus)
+            if lit <= 0.5:
+                continue
+            pts = self._wedge(i, sweep, render.POP * lit)
+            if pts is None:
+                continue
+            md.polygon([(ox + x * s, oy + y * s) for x, y in pts], fill=255)
+            hit = True
+        return m if hit else None
+
+    def cell_at(self, f: float) -> int:
+        """the grid the focus is currently on.
+
+        Geometric, not linear: the eye reads a grid by how many cells it has,
+        and halving the cell doubles that. Interpolated linearly, the whole
+        interesting part of the pull happens in the last fifth of it.
+        """
+        g = min(1.0, f / SHARP_AT)
+        return max(2, int(round(math.exp(render.lerp(math.log(COARSE),
+                                                     math.log(FINE), g)))))
+
     def _ring(self, cv, cam, sweep, focus) -> None:
         # `_ring` runs first, so this is where the canvas for the whole frame
         # is picked up; the base class hands the others an ImageDraw only.
         self._cv = cv
-        gw, gh = int(self.rcols * self.rcw), int(self.rrows * self.rch)
+        f = self._sharp
+        vx, vy = self.vp[0], self.vp[1]
+        lay = self._smooth(cam, sweep, focus)
+        # Past `SHARP_AT` the grid stops getting finer and dissolves into the
+        # picture it was standing for instead. Running the cell all the way
+        # down to one pixel would get there on its own and cost a hundred
+        # times as much to do it, for a difference nobody can see.
+        mix = max(0.0, min(1.0, (f - SHARP_AT) / (1.0 - SHARP_AT)))
+        if mix >= 0.999:
+            cv.paste(lay, (vx, vy), lay)
+            return
+
+        cell = self.cell_at(f)
+        cw, ch = cell * self.uk, cell * 2 * self.uk
+        cols, rows = int(self.W / cw) + 1, int(self.H / ch) + 1
+        gw, gh = int(cols * cw), int(rows * ch)
         full = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
-        full.paste(self._smooth(cam, sweep, focus), (self.vp[0], self.vp[1]))
-        cells = full.resize((self.rcols, self.rrows), Image.BOX)
-        rgb = cells.convert("RGB").tobytes()
+        full.paste(lay, (vx, vy))
+        rgb = full.resize((cols, rows), Image.BOX).convert("RGB").tobytes()
         # ... and again at sub-cell resolution, which is what says *where* in
-        # each cell the ink goes. One resize in C, rather than a sampling loop
+        # each cell the ink goes. One resize in C rather than a sampling loop
         # in Python -- and it is a reduction of a correct picture, so unlike
         # the geometry sampling it replaced it cannot misread a boundary.
-        sw = self.rcols * NX
-        sub = full.resize((sw, self.rrows * NY), Image.BOX).getchannel("A").tobytes()
+        sw = cols * NX
+        sub = full.resize((sw, rows * NY),
+                          Image.BOX).getchannel("A").tobytes()
 
         # Floyd-Steinberg, one row of error ahead of the cursor and one below.
-        # The error is what makes five levels enough: a cell that wanted 0.6
-        # and got 0.5 hands the missing tenth to its neighbours, and the ramp
-        # comes out as texture rather than as five flat bands with seams.
-        here = [0.0] * (self.rcols + 2)
-        below = [0.0] * (self.rcols + 2)
-        grid, self._lit_cells = {}, []
-        r0 = int(self.tch / self.rch) + 1       # clear of the status line
-        # A terminal has a palette, and the palette is the answer to the one
-        # thing the dither gets wrong on its own. A cell's colour comes back
-        # premultiplied by its coverage, so recovering the ink means dividing
-        # by a number that is small exactly where the eighth-of-a-level of
-        # rounding on it matters most -- and a faint edge cell comes out grey,
-        # or white, or some hue the chart does not contain. Snapping to the
-        # colours the ring is actually made of cannot do that.
+        here = [0.0] * (cols + 2)
+        below = [0.0] * (cols + 2)
+        grid = {}
+        r0 = int(self.tch / ch) + 1             # clear of the status line
         pal = [(tuple(int(render.lerp(d["color"][k], self.th["bg"][k],
                                       self.dim * (1.0 - self._lit(i, focus))))
-                      for k in range(3)),
-                bool(focus) and self._lit(i, focus) > 0.5)
+                      for k in range(3)),)
                for i, d in enumerate(self.items)]
         snap: dict = {}
-        for r in range(r0, self.rrows):
-            here, below = below, [0.0] * (self.rcols + 2)
-            for c in range(self.rcols):
-                k = r * self.rcols + c
-                grid_ = []
+        for r in range(r0, rows):
+            here, below = below, [0.0] * (cols + 2)
+            for c in range(cols):
+                k = r * cols + c
+                block = []
                 for y in range(NY):
                     row = (r * NY + y) * sw + c * NX
-                    grid_ += sub[row:row + NX]
-                a = sum(grid_) / (255.0 * NX * NY)
-                if a < INK:
+                    block += sub[row:row + NX]
+                if sum(block) / (255.0 * NX * NY) < INK:
                     here[c + 1] = 0.0           # nothing here: drop the error
                     continue
-                # the diffused error is a debt on the whole cell, so it is
-                # carried by every sub-cell alike -- it says "this cell owes
-                # the picture a little more ink", not "the shape was different"
+                # the diffused error is a debt on the whole cell, so every
+                # sub-cell carries it alike -- it says "this cell owes the
+                # picture a little more ink", not "the shape was different"
                 d = here[c + 1]
-                want = [min(1.0, max(0.0, v / 255.0 + d)) for v in grid_]
-                key = tuple(int(v * 3.99) for v in want)
-                ch, dens = self._pick(want, key)
+                want = [min(1.0, max(0.0, v / 255.0 + d)) for v in block]
+                ch_, dens = self._pick(cell, want,
+                                       tuple(int(v * 3.99) for v in want))
                 e = sum(want) / len(want) - dens
                 here[c + 2] += e * 7 / 16
                 below[c] += e * 3 / 16
                 below[c + 1] += e * 5 / 16
                 below[c + 2] += e * 1 / 16
-                if ch == " ":
+                if ch_ == " ":
                     continue
-                # Which of the ring's colours is this cell? Not "divide the
-                # premultiplied colour by the coverage and look for the
-                # nearest" -- that divides by a small number precisely where
-                # the rounding on it is worst, and a faint edge cell comes back
-                # some hue the chart does not contain. The *direction* of the
-                # premultiplied colour is the ink's direction whatever the
-                # coverage, so match on that: the best fit is the palette
-                # entry with the largest cosine, and no division happens.
+                # Which of the ring's colours is this? Not "divide the
+                # premultiplied colour by the coverage and take the nearest" --
+                # that divides by a small number exactly where the rounding on
+                # it is worst, and a faint edge cell comes back some hue the
+                # chart does not contain. The *direction* of a premultiplied
+                # colour is the ink's direction whatever the coverage.
                 raw = (rgb[3 * k], rgb[3 * k + 1], rgb[3 * k + 2])
-                key = (raw[0] >> 2, raw[1] >> 2, raw[2] >> 2)
-                if key not in snap:
-                    snap[key] = max(pal, key=lambda p: (
+                ckey = (raw[0] >> 2, raw[1] >> 2, raw[2] >> 2)
+                if ckey not in snap:
+                    snap[ckey] = max(pal, key=lambda p: (
                         sum(p[0][j] * raw[j] for j in range(3)) ** 2
-                        / max(1, sum(v * v for v in p[0]))))
-                col, lit = snap[key]
-                grid[(c, r)] = (ch, col, None)
-                if lit:
-                    self._lit_cells.append((c, r))
-        self._print(grid, self.fring, self.rcw, self.rch)
+                        / max(1, sum(v * v for v in p[0]))))[0]
+                grid[(c, r)] = (ch_, snap[ckey], None)
+
+        printed = Image.new("RGB", cv.size, self.th["bg"])
+        self._cv = printed
+        self._print(grid, self._font_for(cell), cw, ch)
+        self._cv = cv
+        if mix > 0.002:
+            true = Image.new("RGB", cv.size, self.th["bg"])
+            true.paste(lay, (vx, vy), lay)
+            printed = Image.blend(printed, true, mix)
+        cv.paste(printed, (0, 0))
 
     # -- the card, measured in cells so the camera solves for the real one ---
     def _build_cards(self) -> None:
@@ -545,14 +609,37 @@ class AnsiDonut(render.DonutRenderer):
             self._scan = im.resize((self.W, self.H), Image.NEAREST)
         return self._scan
 
+    def focus_at(self, seg: dict, u: float, last: bool) -> float:
+        """how far into focus the ring is, on this segment's own clock.
+
+        Only the beats the camera holds still for come into focus at all, and
+        they let go of it before it moves again. So the ring is sharp exactly
+        when it is being looked at and coarse exactly when it is travelling --
+        which is the right way round for a character grid, because a grid that
+        moves is a grid that crawls.
+        """
+        if seg["kind"] not in ("intro", "hold", "outro"):
+            return 0.0
+        t, d = u * seg["dur"], seg["dur"]
+        i, o = min(FOCUS_IN, d / 2), min(FOCUS_OUT, d / 2)
+        a = min(1.0, t / i) if i > 0 else 1.0
+        if not last and o > 0:
+            a = min(a, (d - t) / o)
+        return render.ease(max(0.0, min(1.0, a)))
+
     def frame(self, n: int) -> Image.Image:
+        s, u, prev = self.at(n / self.fps)
+        self._sharp = self.focus_at(s, u, s is self.timeline[-1])
+        p = render.ease(u)
+        cam = self._cam_lerp(s["cam0"], s["cam1"], p, s["arc"])
+        sweep = render.lerp(s["sweep0"], s["sweep1"], p)
+        foc = []
+        if s["focus"] is not None:
+            foc = [(s["focus"], 1.0)] if s["kind"] != "move" else []
         cv = super().frame(n)
-        if self._lit_cells and BLOOM > 0:
-            mask = Image.new("L", cv.size, 0)
-            md = ImageDraw.Draw(mask)
-            for c, r in self._lit_cells:
-                md.rectangle([c * self.rcw, r * self.rch,
-                              (c + 1) * self.rcw, (r + 1) * self.rch], fill=255)
+
+        mask = self._lit_mask(cam, sweep, foc) if BLOOM > 0 else None
+        if mask is not None:
             lit = Image.new("RGB", cv.size, (0, 0, 0))
             lit.paste(cv, mask=mask)
             glow = lit.filter(ImageFilter.GaussianBlur(int(GLOW_PX * self.uk)))
@@ -561,31 +648,62 @@ class AnsiDonut(render.DonutRenderer):
         return ImageChops.multiply(cv, self._scanlines())
 
 
+def clip(r, out, ramp):
+    """the whole thing, so the focus can be seen doing what it does"""
+    frames = os.path.join(out, "frames")
+    os.makedirs(frames, exist_ok=True)
+    for f in os.listdir(frames):
+        os.remove(os.path.join(frames, f))
+    n = int(round(r.total() * r.fps))
+    t0 = time.time()
+    for k in range(n):
+        r.frame(k).save(os.path.join(frames, f"f{k:05d}.png"))
+        if k % 120 == 0:
+            print(f"    {k}/{n}  {(time.time() - t0):.0f}s", flush=True)
+    mp4 = os.path.join(out, f"donut-{ramp}.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-v", "error", "-framerate", str(r.fps),
+        "-i", os.path.join(frames, "f%05d.png"),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", mp4], check=True)
+    print(f"  {n} frames, {n / r.fps:.1f}s -> {mp4}")
+
+
 def main():
     out = sys.argv[1]
     cell = int(sys.argv[2]) if len(sys.argv) > 2 else RING_W
     ramp = sys.argv[3] if len(sys.argv) > 3 else "unicode"
     os.makedirs(out, exist_ok=True)
-    with open(os.path.join(ROOT, "examples/memory-breakdown.json")) as fh:
+    src = os.environ.get("DONUT_SPEC",
+                        os.path.join(ROOT, "examples/memory-breakdown.json"))
+    with open(src) as fh:
         spec = json.load(fh)
     r = AnsiDonut(spec, out, cell, ramp)
-    print(f"  ring {cell}x{cell * 2}px -> {r.rcols}x{r.rrows} characters; "
+    print(f"  focus pulls {COARSE}px -> {FINE}px then dissolves; "
           f"type {CELL_W}x{CELL_H}px -> {r.cols}x{r.rows}")
     print(f"  ramp {ramp!r}: {len(r.ramp)} characters, "
           f"{NX}x{NY} sub-cells each")
-    acc, picks = 0.0, {}
-    for s in r.timeline:
-        if s["kind"] == "intro":
-            picks["intro"] = acc + s["dur"] * 0.75
-        if s["kind"] == "hold":
-            picks[f'hold{s["focus"]}'] = acc + s["dur"] * 0.55
-        acc += s["dur"]
-    for name in ("intro", "hold0", "hold4"):
+    if "--clip" in sys.argv:
+        clip(r, out, ramp)
+        return
+    acc, marks = 0.0, []
+    for seg in r.timeline:
+        if seg["kind"] == "hold" and seg["focus"] == 0:
+            # the whole rack focus on one beat, plus the travel either side
+            marks = [("a-blurred", acc - 0.14), ("b-coarse", acc + 0.10),
+                     ("c-mid", acc + 0.26), ("d-fine", acc + 0.38),
+                     ("e-sharp", acc + seg["dur"] * 0.5),
+                     ("f-letting-go", acc + seg["dur"] - 0.14)]
+            break
+        acc += seg["dur"]
+    for name, t in marks:
         t0 = time.time()
-        r.frame(int(picks[name] * r.fps)).save(
-            os.path.join(out, f"{ramp}{cell}-{name}.png"))
-        print(f"  {name:6s} t={picks[name]:5.2f}s  "
-              f"{(time.time() - t0) * 1000:.0f}ms")
+        seg, u, _ = r.at(t)
+        f = r.focus_at(seg, u, seg is r.timeline[-1])
+        r.frame(int(t * r.fps)).save(
+            os.path.join(out, f"{ramp}-{name}.png"))
+        print(f"  {name:13s} t={t:5.2f}s  focus={f:4.2f}  "
+              f"cell={r.cell_at(f):2d}px  {(time.time() - t0) * 1000:4.0f}ms")
 
 
 if __name__ == "__main__":
