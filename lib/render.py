@@ -303,6 +303,18 @@ class Renderer:
                 raise SystemExit(
                     f"annotation shot {a['shot']!r} was never taken; add "
                     f'{{"shot": "{a["shot"]}"}} to capture.keys')
+            sw = a.get("swipe")
+            if sw:
+                if not sw.get("to"):
+                    raise SystemExit('annotation swipe needs a "to" shot')
+                if sw["to"] not in self.shots:
+                    raise SystemExit(
+                        f"annotation swipe.to {sw['to']!r} was never taken; "
+                        f'add {{"shot": "{sw["to"]}"}} to capture.keys')
+                if not sw.get("rows"):
+                    raise SystemExit(
+                        'annotation swipe needs "rows": the row indices to '
+                        "wipe, in the order they should go")
         self.cap_intro = r.get("intro_caption", ["", ""])
         self.cap_outro = r.get("outro_caption", ["", ""])
         lb = dict(DEFAULT_LABELS)
@@ -521,11 +533,77 @@ class Renderer:
 
     def screen(self, i: int, hp: float, s: float):
         """beat i's scaled screen at hold-progress `hp`"""
+        if self.ann[i].get("swipe"):
+            return self.swiped(i, hp, s)
         sh = self.shot(i, hp)
         base = self.scaled(sh[0], s, sh[1])
         if len(sh) == 5:
             base = Image.blend(base, self.scaled(sh[2], s, sh[3]), sh[4])
         return base
+
+    def swiped(self, i: int, hp: float, s: float):
+        """beat i's screen with a row-wise wipe from `shot` to `swipe.to`.
+
+        A dissolve between two screens that differ only in the *text of some
+        rows* reads as a blur, not as a change: both strings are legible at
+        once through the middle of it and the eye cannot tell which is
+        arriving. A wipe with a hard edge can only ever show one of them per
+        pixel, so the new name is unambiguous the moment it appears.
+
+        Staggering the rows is what makes it read as a sequence of separate
+        edits rather than one repaint. Each named row runs its own wipe,
+        `row` seconds long, starting `stagger` seconds after the row above --
+        so the times are in seconds and follow the beat's `hold` rather than
+        being a share of it, which is what lets a cascade keep its cadence
+        when the hold is retimed.
+
+        The two screens must be the same capture geometry, which for two
+        `shot`s of one take they always are. Rows are wiped in the order
+        given, not in the order they sit on screen; a caller stepping down a
+        list just lists them in that order.
+        """
+        a = self.ann[i]
+        sw = a["swipe"]
+        src = a.get("shot")
+        A = self.scaled(self.shots[src], s, f"shot:{src}") if src else \
+            self.scaled(self.A, s, "A")
+        B = self.scaled(self.shots[sw["to"]], s, f"shot:{sw['to']}")
+        rows = [int(r) for r in sw.get("rows", [])]
+        if not rows:
+            return A
+        t = hp * self.hold(i)
+        t0 = float(sw.get("at", 0.0))
+        dur = float(sw.get("row", 0.2))
+        stag = float(sw.get("stagger", 0.1))
+        edge = int(sw.get("edge", 3))
+        ec = sw.get("edge_color") or self.th["after"]
+
+        W, H = A.size
+        rh = self.RH * s
+        out = A.copy()
+        mask = Image.new("L", A.size, 0)
+        md = ImageDraw.Draw(mask)
+        moving = []
+        for k, r in enumerate(rows):
+            p = (t - (t0 + k * stag)) / dur if dur > 0 else 1.0
+            p = 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
+            if p <= 0.0:
+                continue
+            y0 = int(round(r * rh))
+            y1 = int(round((r + 1) * rh))
+            if y1 <= 0 or y0 >= H:
+                continue
+            x = int(round(W * p))
+            md.rectangle([0, max(0, y0), x, min(H, y1) - 1], fill=255)
+            if 0.0 < p < 1.0 and edge > 0:
+                moving.append((x, y0, y1))
+        out.paste(B, (0, 0), mask)
+        if moving:
+            d = ImageDraw.Draw(out)
+            for x, y0, y1 in moving:
+                d.rectangle([max(0, x - edge), max(0, y0),
+                             x, min(H, y1) - 1], fill=tuple(ec))
+        return out
 
     # The pointer, in units of its own height: the classic arrow. Drawn
     # rather than screenshotted because X keeps the cursor out of a window

@@ -653,6 +653,37 @@ lands with the screen it describes. `tone` is a theme key (`before`, `after`,
 establishing shot takes the first beat's, so a clip that opens on a BEFORE does
 not open in the after's green.
 
+## Swiping one screen onto another
+
+Two screens that differ only in the *text of some rows* -- a rename, a
+retitle, a units change -- must not be dissolved into each other. Through the
+middle of a dissolve both strings are legible at once and the eye cannot tell
+which one is arriving; it reads as a blur, not as a change. A wipe with a hard
+edge can only ever show one of them per pixel:
+
+```jsonc
+{"shot": "before", "hold": 3.0,
+ "swipe": {"to": "after", "rows": [5, 6, 7, 8, 9, 11, 12],
+           "at": 0.35, "row": 0.20, "stagger": 0.10, "edge": 3}}
+```
+
+The beat is drawn on `shot`, and each row named in `rows` wipes across to the
+same row of `to`, left to right. `at` is when the first row starts, `row` is
+how long one row takes, `stagger` is the gap between one row and the next --
+all in **seconds off the beat's `hold`**, not shares of it, so a cascade keeps
+its cadence when the beat is retimed. `edge` is the width in pixels of the
+leading bar drawn at the wipe front (`edge_color` overrides the theme's
+`after`); `0` turns it off.
+
+Rows are wiped in the order given, not in the order they sit on screen, and a
+row not named is never touched -- which is what keeps a folder header from
+flickering under a cascade running past it. The two screens have to be the
+same capture geometry, which for two `shot`s of one take they always are.
+
+The stagger is the part that matters. All the rows wiping at once reads as one
+repaint; a tenth of a second between them reads as a sequence of separate
+edits, which is usually what actually happened.
+
 ## Shots: more than one screen in one clip
 
 A clip is stills with a camera over them, so nothing on screen moves by
