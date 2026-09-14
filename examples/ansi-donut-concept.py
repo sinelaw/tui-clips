@@ -7,7 +7,7 @@ card placement are the real ones -- only the ink changes. That is the point of
 keeping it a subclass: it says what the look would cost, which is the drawing
 and nothing else.
 
-    python3 examples/ansi-donut-concept.py /tmp/ansi [cell-width]
+    python3 examples/ansi-donut-concept.py /tmp/ansi [cell] [ramp]
 
 It exists because this repo is about terminals, and the donut is the one shape
 in it that does not look like one. If it earns its place it becomes a
@@ -50,24 +50,35 @@ RING_W = 5
 # Every one of these was checked against the font rather than assumed: DejaVu
 # Sans Mono has all of them, and has neither braille nor the Unicode 13 legacy
 # sextants, which would have given 2x4 and 2x3 exactly.
-# `▏` and `▁` are deliberately absent. At this sub-cell resolution their ink
-# reads as half of one column or row, so a cell with a single lit corner
-# matches one of them better than it matches any quadrant -- and prints a
-# full-height sliver next to nothing, floating off the edge of the arc. A
-# glyph the matcher cannot place is worse than a glyph it does not have.
-GLYPHS = ("█▀▄▌▐"
-          "▖▗▘▝▙▚▛▜▞▟"
-          "▂▃▅▆▇"
-          "▎▍▋▊▉"
-          "◢◣◤◥◺◿◹◸"
-          "░▒▓")
-SS = 4                      # coverage samples per cell, per axis
+# The alphabet, ordered by how much of a cell each one inks. This is libcaca's
+# trick and it is the opposite of what the first pass here did: do not try to
+# work out what shape a cell is, just work out how *dark* it is and print the
+# character of that darkness -- then push the rounding error into the cells
+# next door so it comes out in the texture instead of in a band.
+#
+# Five levels sounds like nothing until you remember that is what dithering is
+# for. Five levels plus error diffusion resolves an edge better than thirty-six
+# glyphs matched cell by cell did, and it cannot invent a shape that is not
+# there, which is where the gaps and the floating slivers came from.
+# Any string works: the density of each character is measured off the font and
+# the set is sorted by it, so a set is just an alphabet and a preference. The
+# second argument to the script picks one.
+RAMPS = {
+    "shades":  " ░▒▓█",
+    "ansi":    " ·░▒▓█",
+    "ascii":   " .:-=+*#%@",
+    "blocks":  " ▁▂▃▄▅▆▇█",
+    "unicode": " ░▒▓█▁▂▃▄▅▆▇▏▎▍▌▋▊▉▖▗▘▝▚▞",
+    "dots":    " .·:∘∙•●",
+}
 
 NOTE_COLS = 30              # a card's description, wrapped in columns
-# Below this share of a cell, print nothing. One lit sample in sixteen is not
-# a shape, it is a corner the arc clipped, and whatever gets printed for it
-# lands in the dark on its own.
-INK = 0.16
+# Error is never pushed into a cell the ring does not touch at all. Without
+# that, diffusion walks ink out past the edge of the arc and prints it in the
+# dark -- the same floating-sliver artefact as before, arrived at from the
+# other direction.
+INK = 0.004
+PANEL_A = 232               # how opaque a card's panel is over the ring
 SCANLINE = 0.88             # how far every second row is taken down
 BLOOM = 0.40                # how much blurred light the lit section adds back
 GLOW_PX = 9                 # how far the phosphor spreads
@@ -100,7 +111,7 @@ class AnsiDonut(render.DonutRenderer):
     # labels in something smaller and says 64.
     LABEL_LH = 2 * CELL_H + 14
 
-    def __init__(self, spec, outdir, ring=RING_W):
+    def __init__(self, spec, outdir, ring=RING_W, ramp="shades"):
         # The cells have to exist before `super().__init__` runs, because it
         # calls `_fit` and `_build_cards`, and both of those are overridden
         # here and measure in cells.
@@ -111,9 +122,9 @@ class AnsiDonut(render.DonutRenderer):
         self.ftype = ImageFont.truetype(render.MONO, px)
         self.fbig = ImageFont.truetype(render.MONO, px * 2)
         self.fring = ImageFont.truetype(render.MONO, int(ring / 0.6023 * uk))
+        self.ramp = RAMPS[ramp]
         self._tiles: dict = {}
         self._masks: list = []
-        self._match: dict = {}
         self._scan = None
         self._cv = None
         self._lit_cells: list = []
@@ -126,36 +137,23 @@ class AnsiDonut(render.DonutRenderer):
         self._build_masks()
 
     def _build_masks(self) -> None:
-        """each candidate's own ink, as an SS x SS grid of coverage.
+        """how much of a cell each character of the ramp inks.
 
-        Measured off the rendered glyph rather than assumed from its name: a
-        triangle in Geometric Shapes is drawn to a symbol's proportions, not a
-        block's, and the matcher should be comparing what the font will
-        actually print.
+        Measured off the rendered glyph rather than assumed: a font's idea of
+        how dark its medium shade is is the only one that matters, because it
+        is the one that will be on the screen.
         """
         w, h = int(self.rcw), int(self.rch)
-        for g in GLYPHS:
+        for g in self.ramp:
             im = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(im).text((0, 0), g, font=self.fring, fill=255)
-            self._masks.append(
-                (g, [p / 255.0 for p in im.resize((SS, SS), Image.BOX).getdata()]))
+            if g != " ":
+                ImageDraw.Draw(im).text((0, 0), g, font=self.fring, fill=255)
+            self._masks.append((g, sum(im.tobytes()) / (255.0 * w * h)))
+        self._masks.sort(key=lambda t: t[1])
 
-    def _glyph(self, key: int) -> str:
-        """the character whose ink is closest to this coverage pattern.
-
-        Cached on the pattern, which is what makes it affordable: there are
-        2**16 patterns in principle and a few hundred on any real frame, since
-        the cells that are not empty or full are all edges and edges repeat.
-        """
-        if key not in self._match:
-            want = [(key >> k) & 1 for k in range(SS * SS)]
-            best, pick = None, " "
-            for g, m in self._masks:
-                e = sum((a - b) * (a - b) for a, b in zip(want, m))
-                if best is None or e < best:
-                    best, pick = e, g
-            self._match[key] = pick
-        return self._match[key]
+    def _pick(self, want: float):
+        """-> (character, how much of a cell it actually inks)"""
+        return min(self._masks, key=lambda t: abs(t[1] - want))
 
     def _fit(self) -> None:
         """the first thing `super().__init__` calls after the fonts exist, so
@@ -164,27 +162,48 @@ class AnsiDonut(render.DonutRenderer):
         super()._fit()
 
     # -- printing -----------------------------------------------------------
-    def _tile(self, ch, fg, bg, font, w, h):
-        """one printed cell, cached; there are only ever a few dozen"""
-        key = (ch, fg, bg, font.size, w)
+    def _tile(self, ch, fg, font, w, h):
+        """one printed character, on nothing.
+
+        Transparent, and pasted through its own alpha. An opaque tile has to be
+        bigger than the cell -- a block glyph overhangs its advance, which is
+        what makes blocks tile seamlessly -- and an opaque tile that is bigger
+        than the cell paints its own background over the neighbour it overhangs
+        into. Every cell then lays a dark strip along the next one, and the
+        picture comes out combed. That was the gaps.
+        """
+        key = (ch, fg, font.size, w)
         if key not in self._tiles:
-            im = Image.new("RGB", (int(w) + 2, int(h) + 2), bg)
-            ImageDraw.Draw(im).text((0, 0), ch, font=font, fill=fg)
+            im = Image.new("RGBA", (int(w) + 3, int(h) + 3), (0, 0, 0, 0))
+            ImageDraw.Draw(im).text((0, 0), ch, font=font, fill=(*fg, 255))
             self._tiles[key] = im
         return self._tiles[key]
 
     def _print(self, grid, font=None, cw=None, chh=None) -> None:
-        cv, bgc = self._cv, self.th["bg"]
+        """paint a grid of cells, backgrounds then glyphs.
+
+        Backgrounds go down first and all at once, into one transparent
+        overlay that is composited in a single pass. Painted cell by cell they
+        arrive after some of their own neighbours' glyphs and rub them out; and
+        painted opaque they punch a flat hole in the picture, where what a
+        panel over a chart wants is to let a little of the chart through.
+        """
+        cv = self._cv
         font = font or self.ftype
         cw = cw or self.tcw
         chh = chh or self.tch
-        for (c, r), (ch, fg, bg) in grid.items():
-            x, y = int(c * cw), int(r * chh)
-            if ch == " ":
-                if bg is not None:
-                    cv.paste(bg, (x, y, x + int(cw) + 1, y + int(chh) + 1))
-            else:
-                cv.paste(self._tile(ch, fg, bg or bgc, font, cw, chh), (x, y))
+        bgs = [(cell, bg) for cell, (_, _, bg) in grid.items() if bg]
+        if bgs:
+            ov = Image.new("RGBA", cv.size, (0, 0, 0, 0))
+            od = ImageDraw.Draw(ov)
+            for (c, r), bg in bgs:
+                od.rectangle([int(c * cw), int(r * chh),
+                              int((c + 1) * cw), int((r + 1) * chh)], fill=bg)
+            cv.paste(ov, (0, 0), ov)
+        for (c, r), (ch, fg, _) in grid.items():
+            if ch != " ":
+                t = self._tile(ch, fg, font, cw, chh)
+                cv.paste(t, (int(c * cw), int(r * chh)), t)
 
     def _cell(self, px, py):
         return int(px / self.tcw), int(py / self.tch)
@@ -250,61 +269,102 @@ class AnsiDonut(render.DonutRenderer):
             return None
         return i
 
+    def _smooth(self, cam, sweep, focus):
+        """the ring drawn the ordinary way, as RGBA over the viewport.
+
+        The alpha channel is coverage and the colour channels are the section
+        colours, premultiplied by it -- which is exactly what a downsample of a
+        correct picture gives you, and exactly what the dither needs. Every
+        artefact in the first pass came from not having this: classifying a
+        cell by the angle of its centre misreads every cell on a boundary, and
+        a section slid out of the ring has two boundaries nobody else agrees
+        about. Drawing the thing properly and then reducing it cannot make that
+        mistake, because there is no classification left to get wrong.
+        """
+        ss, (_, _, vw, vh) = render.DONUT_SS, self.vp
+        lay = Image.new("RGBA", (vw * ss, vh * ss), (0, 0, 0, 0))
+        ld = ImageDraw.Draw(lay)
+        s, cx, cy = cam
+        ox, oy = (vw / 2 - cx * s) * ss, (vh / 2 - cy * s) * ss
+        for i, d in enumerate(self.items):
+            lit = self._lit(i, focus)
+            pts = self._wedge(i, sweep, render.POP * lit)
+            if pts is None:
+                continue
+            col = tuple(int(render.lerp(d["color"][k], self.th["bg"][k],
+                                        self.dim * (1.0 - lit)))
+                        for k in range(3))
+            ld.polygon([(ox + x * s * ss, oy + y * s * ss) for x, y in pts],
+                       fill=(*col, 255))
+        return lay.reduce(ss)
+
     def _ring(self, cv, cam, sweep, focus) -> None:
         # `_ring` runs first, so this is where the canvas for the whole frame
         # is picked up; the base class hands the others an ImageDraw only.
         self._cv = cv
-        s = cam[0]
-        offs, cols = [], []
-        for i, d in enumerate(self.items):
-            lit = self._lit(i, focus)
-            mid = math.radians((d["a0"] + d["a1"]) / 2)
-            offs.append((math.cos(mid) * render.POP * lit,
-                         math.sin(mid) * render.POP * lit))
-            cols.append(tuple(int(render.lerp(d["color"][k], self.th["bg"][k],
-                                              self.dim * (1.0 - lit)))
-                              for k in range(3)))
-        # a cell whose centre is further from the band than its own half
-        # diagonal cannot be touched by it, which is most of them most of the
-        # time -- one hypot to skip four atan2s
-        reach = math.hypot(self.rcw, self.rch) / 2 / s + render.POP + 0.02
+        gw, gh = int(self.rcols * self.rcw), int(self.rrows * self.rch)
+        full = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+        full.paste(self._smooth(cam, sweep, focus), (self.vp[0], self.vp[1]))
+        cells = full.resize((self.rcols, self.rrows), Image.BOX)
+        alpha = cells.getchannel("A").tobytes()
+        rgb = cells.convert("RGB").tobytes()
 
+        # Floyd-Steinberg, one row of error ahead of the cursor and one below.
+        # The error is what makes five levels enough: a cell that wanted 0.6
+        # and got 0.5 hands the missing tenth to its neighbours, and the ramp
+        # comes out as texture rather than as five flat bands with seams.
+        here = [0.0] * (self.rcols + 2)
+        below = [0.0] * (self.rcols + 2)
         grid, self._lit_cells = {}, []
         r0 = int(self.tch / self.rch) + 1       # clear of the status line
+        # A terminal has a palette, and the palette is the answer to the one
+        # thing the dither gets wrong on its own. A cell's colour comes back
+        # premultiplied by its coverage, so recovering the ink means dividing
+        # by a number that is small exactly where the eighth-of-a-level of
+        # rounding on it matters most -- and a faint edge cell comes out grey,
+        # or white, or some hue the chart does not contain. Snapping to the
+        # colours the ring is actually made of cannot do that.
+        pal = [(tuple(int(render.lerp(d["color"][k], self.th["bg"][k],
+                                      self.dim * (1.0 - self._lit(i, focus))))
+                      for k in range(3)),
+                bool(focus) and self._lit(i, focus) > 0.5)
+               for i, d in enumerate(self.items)]
+        snap: dict = {}
         for r in range(r0, self.rrows):
+            here, below = below, [0.0] * (self.rcols + 2)
             for c in range(self.rcols):
-                wx, wy = self._world(cam, (c + 0.5) * self.rcw,
-                                     (r + 0.5) * self.rch)
-                d0 = math.hypot(wx, wy)
-                if d0 - 1.0 > reach or self.inner - d0 > reach:
+                k = r * self.rcols + c
+                a = alpha[k] / 255.0
+                if a < INK:
+                    here[c + 1] = 0.0           # nothing here: drop the error
                     continue
-                seen: dict = {}
-                key, bit = 0, 1
-                for sy in range(SS):
-                    for sx in range(SS):
-                        h = self._hit(*self._world(
-                            cam, (c + (sx + 0.5) / SS) * self.rcw,
-                            (r + (sy + 0.5) / SS) * self.rch), sweep, offs)
-                        if h is not None:
-                            seen[h] = seen.get(h, 0) + 1
-                            key |= bit
-                        bit <<= 1
-                if not seen or sum(seen.values()) / (SS * SS) < INK:
+                want = min(1.0, max(0.0, a + here[c + 1]))
+                ch, dens = self._pick(want)
+                e = want - dens
+                here[c + 2] += e * 7 / 16
+                below[c] += e * 3 / 16
+                below[c + 1] += e * 5 / 16
+                below[c + 2] += e * 1 / 16
+                if ch == " ":
                     continue
-                i = max(seen, key=seen.get)
-                ch = self._glyph(key)
-                if ch != " ":
-                    grid[(c, r)] = (ch, cols[i], None)
-                    # Only a section being *read* glows. With nothing in focus
-                    # every section would qualify, and a bloom over the whole
-                    # ring is not a phosphor, it is a fog.
-                    # Only a section being *read* glows. With nothing in focus
-                    # -- the establishing shot -- every section would qualify,
-                    # and a bloom over the whole ring is not a phosphor, it is
-                    # a fog: the colours wash to pastel and the dither it was
-                    # meant to flatter disappears into it.
-                    if focus and self._lit(i, focus) > 0.5:
-                        self._lit_cells.append((c, r))
+                # Which of the ring's colours is this cell? Not "divide the
+                # premultiplied colour by the coverage and look for the
+                # nearest" -- that divides by a small number precisely where
+                # the rounding on it is worst, and a faint edge cell comes back
+                # some hue the chart does not contain. The *direction* of the
+                # premultiplied colour is the ink's direction whatever the
+                # coverage, so match on that: the best fit is the palette
+                # entry with the largest cosine, and no division happens.
+                raw = (rgb[3 * k], rgb[3 * k + 1], rgb[3 * k + 2])
+                key = (raw[0] >> 2, raw[1] >> 2, raw[2] >> 2)
+                if key not in snap:
+                    snap[key] = max(pal, key=lambda p: (
+                        sum(p[0][j] * raw[j] for j in range(3)) ** 2
+                        / max(1, sum(v * v for v in p[0]))))
+                col, lit = snap[key]
+                grid[(c, r)] = (ch, col, None)
+                if lit:
+                    self._lit_cells.append((c, r))
         self._print(grid, self.fring, self.rcw, self.rch)
 
     # -- the card, measured in cells so the camera solves for the real one ---
@@ -328,7 +388,7 @@ class AnsiDonut(render.DonutRenderer):
             return
         item, card = self.items[i], self.cards[i]
         cam, (px, py) = self.section_view[i]
-        col, bg = item["color"], self.th["caption_bg"]
+        col, bg = item["color"], (*self.th["caption_bg"], PANEL_A)
         w, h = card["cols"], card["rows"]
         c0 = max(0, min(self.cols - w, int((px - card["w"] / 2) / self.tcw)))
         r0 = max(1, min(self.rows - h - 1,
@@ -415,7 +475,8 @@ class AnsiDonut(render.DonutRenderer):
     def header(self, d, accent=None) -> None:
         """a status line in reverse video, which is where a TUI puts one"""
         accent = accent or self.th["after"]
-        grid = {(c, 0): (" ", self.th["bg"], accent) for c in range(self.cols)}
+        grid = {(c, 0): (" ", self.th["bg"], (*accent, 255))
+                for c in range(self.cols)}
         self._text(grid, 1, 0, f" {self.lead} ", self.th["bg"], accent)
         self._text(grid, self.cols - len(self.title) - 2, 0, self.title,
                    self.th["bg"], accent)
@@ -450,13 +511,15 @@ class AnsiDonut(render.DonutRenderer):
 def main():
     out = sys.argv[1]
     cell = int(sys.argv[2]) if len(sys.argv) > 2 else RING_W
+    ramp = sys.argv[3] if len(sys.argv) > 3 else "shades"
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(ROOT, "examples/memory-breakdown.json")) as fh:
         spec = json.load(fh)
-    r = AnsiDonut(spec, out, cell)
-    print(f"  ring {cell}x{cell * 2}px -> {r.rcols}x{r.rrows} characters, "
-          f"{SS}x{SS} sub-cells each, out of {len(GLYPHS)} glyphs; "
+    r = AnsiDonut(spec, out, cell, ramp)
+    print(f"  ring {cell}x{cell * 2}px -> {r.rcols}x{r.rrows} characters; "
           f"type {CELL_W}x{CELL_H}px -> {r.cols}x{r.rows}")
+    print(f"  ramp {ramp!r}: "
+          + " ".join(f"{g}={d:.2f}" for g, d in r._masks))
     acc, picks = 0.0, {}
     for s in r.timeline:
         if s["kind"] == "intro":
@@ -467,7 +530,7 @@ def main():
     for name in ("intro", "hold0", "hold4"):
         t0 = time.time()
         r.frame(int(picks[name] * r.fps)).save(
-            os.path.join(out, f"ansi{cell}-{name}.png"))
+            os.path.join(out, f"{ramp}{cell}-{name}.png"))
         print(f"  {name:6s} t={picks[name]:5.2f}s  "
               f"{(time.time() - t0) * 1000:.0f}ms")
 
