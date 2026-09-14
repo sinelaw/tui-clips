@@ -2328,6 +2328,12 @@ class DonutRenderer(Furniture):
         cam = (s, cam[1] - d[0] / s, cam[2] - d[1] / s)
         return cam, self._pt(cam, *at)
 
+    # How much room a two-line label takes in the column around the ring. A
+    # class attribute rather than a number in the loop because it is a fact
+    # about the type, and a renderer that sets its labels in something else
+    # has to be able to say so.
+    LABEL_LH = 64
+
     # -- labels around the ring ---------------------------------------------
     def _fit(self) -> None:
         """how big the ring can be and still have its labels in the frame.
@@ -2364,7 +2370,7 @@ class DonutRenderer(Furniture):
         screen and in the wrong place.
         """
         s, k = self.scale, self.uk
-        lh = 64 * k                       # two lines of label
+        lh = self.LABEL_LH * k            # two lines of label
         half = (self.vp[3] - self.estab_h) / 2 - 16 * k
         top, bot = -half + lh / 2, half - lh / 2
         self.labels: dict[int, dict] = {}

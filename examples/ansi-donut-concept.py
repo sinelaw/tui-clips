@@ -4,10 +4,10 @@ NOT WIRED IN. Nothing in bin/ or lib/ knows this file exists, and no spec can
 ask for it. It is a subclass of `DonutRenderer` that replaces every drawing
 method with one that prints cells, so the storyboard, the camera solve and the
 card placement are the real ones -- only the ink changes. That is the point of
-keeping it as a subclass: it says what the look would cost, which is the
-drawing and nothing else.
+keeping it a subclass: it says what the look would cost, which is the drawing
+and nothing else.
 
-    python3 examples/ansi-donut-concept.py /tmp/ansi
+    python3 examples/ansi-donut-concept.py /tmp/ansi [cell-width]
 
 It exists because this repo is about terminals, and the donut is the one shape
 in it that does not look like one. If it earns its place it becomes a
@@ -27,92 +27,167 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont  # noqa: E402
 import render  # noqa: E402
 
-# The cell. A terminal has one size of character and everything is made of it,
-# so this is the only length in the picture that is not derived from something
-# else. DejaVu Sans Mono at 20px advances 12.05 and its full block runs the
-# whole 24 -- and overhangs its advance by a pixel each side, so blocks tile
-# with no seam between them.
-FONT_PX = 20
-CELL_W, CELL_H = 12, 24
+# Two cells. Type sits on the character cell, because that is the size type
+# has to be to be read. The chart is printed on a finer one -- the liberty
+# every TUI charting library takes when it reaches for quadrant or braille
+# glyphs to get more pixels than the terminal has characters.
+#
+# The two are multiplied, not traded: the chart cell is a third the width of
+# the type cell, and each of its cells carries 4x4 of sub-cell resolution
+# through the glyph it picks. That is 12x the linear resolution of the type
+# grid, which is why the arc reads as a curve rather than as a staircase while
+# the labels stay legible.
+CELL_W, CELL_H = 14, 28
+RING_W = 5
 
-# How much of a cell the ring covers, and what gets printed for it. This is
-# the whole effect: an arc has no smooth edge, it frays.
-SHADES = ((0.86, "█"), (0.60, "▓"), (0.34, "▒"), (0.10, "░"))
-SS = 3                      # coverage samples per cell, per axis
+# The alphabet the ring is printed in, and the whole reason it can read as a
+# curve at 77 columns. A coverage ramp (` ░▒▓█`) can only say *how much* of a
+# cell is covered; these say *which part*, so an edge lands where the edge is:
+# quadrants for corners, eighths for a near-flat edge, and -- the ones that
+# matter most for an arc -- triangles for a diagonal one. The shades are last,
+# for the ragged cells nothing structural fits.
+#
+# Every one of these was checked against the font rather than assumed: DejaVu
+# Sans Mono has all of them, and has neither braille nor the Unicode 13 legacy
+# sextants, which would have given 2x4 and 2x3 exactly.
+# `▏` and `▁` are deliberately absent. At this sub-cell resolution their ink
+# reads as half of one column or row, so a cell with a single lit corner
+# matches one of them better than it matches any quadrant -- and prints a
+# full-height sliver next to nothing, floating off the edge of the arc. A
+# glyph the matcher cannot place is worse than a glyph it does not have.
+GLYPHS = ("█▀▄▌▐"
+          "▖▗▘▝▙▚▛▜▞▟"
+          "▂▃▅▆▇"
+          "▎▍▋▊▉"
+          "◢◣◤◥◺◿◹◸"
+          "░▒▓")
+SS = 4                      # coverage samples per cell, per axis
 
+NOTE_COLS = 30              # a card's description, wrapped in columns
+# Below this share of a cell, print nothing. One lit sample in sixteen is not
+# a shape, it is a corner the arc clipped, and whatever gets printed for it
+# lands in the dark on its own.
+INK = 0.16
 SCANLINE = 0.88             # how far every second row is taken down
 BLOOM = 0.40                # how much blurred light the lit section adds back
 GLOW_PX = 9                 # how far the phosphor spreads
 
 
-def shade(cov: float) -> str:
-    for thresh, ch in SHADES:
-        if cov >= thresh:
-            return ch
-    return ""
-
-
 class AnsiDonut(render.DonutRenderer):
     """The same clip, printed.
 
-    Three decisions make it read as a terminal rather than as pixel art:
+    Three decisions carry it.
 
-    1. The grid belongs to the *screen*, not to the chart. Cells are a fixed
-       size in canvas pixels whatever the camera is doing, so zooming in does
-       not magnify the blocks -- it resolves the arc into more of them, the
-       way a TUI redraws when you make the window bigger. The whole look rests
-       on this one.
+    The grid belongs to the *screen*, not to the chart. Cells are a fixed size
+    in canvas pixels whatever the camera is doing, so zooming into a section
+    does not magnify the blocks -- it resolves the arc into more of them, the
+    way a TUI redraws when you make the window bigger. Everything else here is
+    set dressing; this is the one that makes it read as a terminal rather than
+    as pixel art.
 
-    2. Coverage picks a glyph, not an alpha. A cell the band half covers gets
-       a medium shade at full brightness, which is how a terminal antialiases:
-       with texture rather than with light.
+    Coverage picks a glyph, not an alpha. A cell the band half covers gets a
+    medium shade at full brightness: a terminal antialiases with texture, not
+    with light.
 
-    3. Everything else is on the same grid. The card is a box-drawn panel
-       titled in its own top rule, the leader steps in box-drawing characters,
-       the header is a status line in reverse video, and the two places that
-       need bigger type get it the only way a terminal can -- a double-height
-       line, which is a real thing a real VT does.
-
-    Then two CRT effects, both nearly free: scanlines, and a phosphor bloom on
-    the section being read and nothing else, which does the work the dim was
-    doing from the other end.
+    Everything else is on the type grid. The card is a box-drawn panel titled
+    in its own top rule, the leader steps in box-drawing characters, the status
+    line is reverse video, and the two places that want bigger type get a
+    double-height line -- DECDHL, the only way a real terminal ever had two
+    sizes at once.
     """
 
-    def __init__(self, spec, outdir):
-        super().__init__(spec, outdir)
-        self.cw = CELL_W * self.uk
-        self.ch = CELL_H * self.uk
-        self.cols = int(self.W / self.cw) + 1
-        self.rows = int(self.H / self.ch) + 1
-        self.fm = ImageFont.truetype(render.MONO, int(FONT_PX * self.uk))
-        self.fbig = ImageFont.truetype(render.MONO, int(FONT_PX * 2 * self.uk))
+    # Two lines of label at the type cell, plus air. The base class sets its
+    # labels in something smaller and says 64.
+    LABEL_LH = 2 * CELL_H + 14
+
+    def __init__(self, spec, outdir, ring=RING_W):
+        # The cells have to exist before `super().__init__` runs, because it
+        # calls `_fit` and `_build_cards`, and both of those are overridden
+        # here and measure in cells.
+        uk = spec["render"].get("size", [1080, 1080])[1] / 1080
+        self.tcw, self.tch = CELL_W * uk, CELL_H * uk
+        self.rcw, self.rch = ring * uk, ring * 2 * uk
+        px = int(CELL_W / 0.6023 * uk)    # the size whose advance is one cell
+        self.ftype = ImageFont.truetype(render.MONO, px)
+        self.fbig = ImageFont.truetype(render.MONO, px * 2)
+        self.fring = ImageFont.truetype(render.MONO, int(ring / 0.6023 * uk))
         self._tiles: dict = {}
+        self._masks: list = []
+        self._match: dict = {}
         self._scan = None
         self._cv = None
         self._lit_cells: list = []
+        super().__init__(spec, outdir)
+        self.cols = int(self.W / self.tcw) + 1
+        self.rows = int(self.H / self.tch) + 1
+        self.rcols = int(self.W / self.rcw) + 1
+        self.rrows = int(self.H / self.rch) + 1
         self._ends = [d["a1"] for d in self.items]
+        self._build_masks()
+
+    def _build_masks(self) -> None:
+        """each candidate's own ink, as an SS x SS grid of coverage.
+
+        Measured off the rendered glyph rather than assumed from its name: a
+        triangle in Geometric Shapes is drawn to a symbol's proportions, not a
+        block's, and the matcher should be comparing what the font will
+        actually print.
+        """
+        w, h = int(self.rcw), int(self.rch)
+        for g in GLYPHS:
+            im = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(im).text((0, 0), g, font=self.fring, fill=255)
+            self._masks.append(
+                (g, [p / 255.0 for p in im.resize((SS, SS), Image.BOX).getdata()]))
+
+    def _glyph(self, key: int) -> str:
+        """the character whose ink is closest to this coverage pattern.
+
+        Cached on the pattern, which is what makes it affordable: there are
+        2**16 patterns in principle and a few hundred on any real frame, since
+        the cells that are not empty or full are all edges and edges repeat.
+        """
+        if key not in self._match:
+            want = [(key >> k) & 1 for k in range(SS * SS)]
+            best, pick = None, " "
+            for g, m in self._masks:
+                e = sum((a - b) * (a - b) for a, b in zip(want, m))
+                if best is None or e < best:
+                    best, pick = e, g
+            self._match[key] = pick
+        return self._match[key]
+
+    def _fit(self) -> None:
+        """the first thing `super().__init__` calls after the fonts exist, so
+        the first chance to say the labels are set in something else"""
+        self.f_lab = self.f_val = self.ftype
+        super()._fit()
 
     # -- printing -----------------------------------------------------------
-    def _tile(self, ch, fg, bg):
+    def _tile(self, ch, fg, bg, font, w, h):
         """one printed cell, cached; there are only ever a few dozen"""
-        key = (ch, fg, bg)
+        key = (ch, fg, bg, font.size, w)
         if key not in self._tiles:
-            im = Image.new("RGB", (int(self.cw) + 2, int(self.ch) + 2), bg)
-            ImageDraw.Draw(im).text((0, 0), ch, font=self.fm, fill=fg)
+            im = Image.new("RGB", (int(w) + 2, int(h) + 2), bg)
+            ImageDraw.Draw(im).text((0, 0), ch, font=font, fill=fg)
             self._tiles[key] = im
         return self._tiles[key]
 
-    def _print(self, grid) -> None:
+    def _print(self, grid, font=None, cw=None, chh=None) -> None:
         cv, bgc = self._cv, self.th["bg"]
+        font = font or self.ftype
+        cw = cw or self.tcw
+        chh = chh or self.tch
         for (c, r), (ch, fg, bg) in grid.items():
-            x, y = int(c * self.cw), int(r * self.ch)
-            if bg is not None and ch == " ":
-                cv.paste(bg, (x, y, x + int(self.cw) + 1, y + int(self.ch) + 1))
-            elif ch != " ":
-                cv.paste(self._tile(ch, fg, bg or bgc), (x, y))
+            x, y = int(c * cw), int(r * chh)
+            if ch == " ":
+                if bg is not None:
+                    cv.paste(bg, (x, y, x + int(cw) + 1, y + int(chh) + 1))
+            else:
+                cv.paste(self._tile(ch, fg, bg or bgc, font, cw, chh), (x, y))
 
     def _cell(self, px, py):
-        return int(px / self.cw), int(py / self.ch)
+        return int(px / self.tcw), int(py / self.tch)
 
     def _text(self, grid, c, r, txt, fg, bg=None):
         for k, ch in enumerate(txt):
@@ -132,6 +207,19 @@ class AnsiDonut(render.DonutRenderer):
         lo, hi = (r0 + 1, r1) if r1 > r0 else (r1, r0 - 1)
         for r in range(lo, hi + 1):
             grid[(c1, r)] = ("│", fg, None)
+
+    @staticmethod
+    def _wrap_cols(text, n):
+        """wrapped in columns, which is the unit a terminal wraps in"""
+        out, line = [], ""
+        for word in text.split():
+            trial = f"{line} {word}".strip()
+            if line and len(trial) > n:
+                out.append(line)
+                line = word
+            else:
+                line = trial
+        return out + ([line] if line else [])
 
     # -- the ring -----------------------------------------------------------
     def _world(self, cam, px, py):
@@ -178,59 +266,73 @@ class AnsiDonut(render.DonutRenderer):
                               for k in range(3)))
         # a cell whose centre is further from the band than its own half
         # diagonal cannot be touched by it, which is most of them most of the
-        # time -- one hypot to skip nine atan2s
-        reach = math.hypot(self.cw, self.ch) / 2 / s + render.POP + 0.02
+        # time -- one hypot to skip four atan2s
+        reach = math.hypot(self.rcw, self.rch) / 2 / s + render.POP + 0.02
 
         grid, self._lit_cells = {}, []
-        for r in range(1, self.rows):
-            for c in range(self.cols):
-                wx, wy = self._world(cam, (c + 0.5) * self.cw,
-                                     (r + 0.5) * self.ch)
+        r0 = int(self.tch / self.rch) + 1       # clear of the status line
+        for r in range(r0, self.rrows):
+            for c in range(self.rcols):
+                wx, wy = self._world(cam, (c + 0.5) * self.rcw,
+                                     (r + 0.5) * self.rch)
                 d0 = math.hypot(wx, wy)
                 if d0 - 1.0 > reach or self.inner - d0 > reach:
                     continue
                 seen: dict = {}
+                key, bit = 0, 1
                 for sy in range(SS):
                     for sx in range(SS):
                         h = self._hit(*self._world(
-                            cam, (c + (sx + 0.5) / SS) * self.cw,
-                            (r + (sy + 0.5) / SS) * self.ch), sweep, offs)
+                            cam, (c + (sx + 0.5) / SS) * self.rcw,
+                            (r + (sy + 0.5) / SS) * self.rch), sweep, offs)
                         if h is not None:
                             seen[h] = seen.get(h, 0) + 1
-                if not seen:
+                            key |= bit
+                        bit <<= 1
+                if not seen or sum(seen.values()) / (SS * SS) < INK:
                     continue
                 i = max(seen, key=seen.get)
-                ch = shade(sum(seen.values()) / (SS * SS))
-                if ch:
+                ch = self._glyph(key)
+                if ch != " ":
                     grid[(c, r)] = (ch, cols[i], None)
-                    # Only a section being read glows. With nothing in focus
+                    # Only a section being *read* glows. With nothing in focus
+                    # every section would qualify, and a bloom over the whole
+                    # ring is not a phosphor, it is a fog.
+                    # Only a section being *read* glows. With nothing in focus
                     # -- the establishing shot -- every section would qualify,
                     # and a bloom over the whole ring is not a phosphor, it is
                     # a fog: the colours wash to pastel and the dither it was
                     # meant to flatter disappears into it.
                     if focus and self._lit(i, focus) > 0.5:
                         self._lit_cells.append((c, r))
-        self._print(grid)
+        self._print(grid, self.fring, self.rcw, self.rch)
 
-    # -- the furniture, also printed ----------------------------------------
+    # -- the card, measured in cells so the camera solves for the real one ---
+    def _build_cards(self) -> None:
+        self.cards: dict[int, dict] = {}
+        for i, item in enumerate(self.items):
+            share = f'{render._fmt_share(item["share"])} of {self.total_txt}'
+            note = self._wrap_cols(item["note"], NOTE_COLS)
+            body = [("", None),                     # air under the title rule
+                    ("", None), ("", None),         # the double-height value
+                    (share, self.th["muted"]), ("", None)]
+            body += [(ln, self.note_c) for ln in note] + [("", None)]
+            inner = max([len(item["label"]) + 6, len(item["display"]) * 2 + 4]
+                        + [len(t) + 4 for t, _ in body])
+            cols, rows = inner + 2, len(body) + 2
+            self.cards[i] = {"cols": cols, "rows": rows, "body": body,
+                             "w": cols * self.tcw, "h": rows * self.tch}
+
     def _card(self, cv, d, i, alpha) -> None:
         if alpha < 0.02:
             return
-        item = self.items[i]
+        item, card = self.items[i], self.cards[i]
         cam, (px, py) = self.section_view[i]
         col, bg = item["color"], self.th["caption_bg"]
-        note = self._wrap(item["note"], self.f_note, render.CARD_TEXT * self.uk)
-        # two blank rows where the double-height value goes
-        body = [("", None), ("", None), ("", None),
-                (f'{render._fmt_share(item["share"])} of {self.total_txt}',
-                 self.th["muted"]), ("", None)]
-        body += [(ln, self.note_c) for ln in note] + [("", None)]
-        inner = max([len(item["label"]) + 6, len(item["display"]) * 2 + 4]
-                    + [len(t) + 4 for t, _ in body])
-        w, h = inner + 2, len(body) + 2
-        c0 = max(0, min(self.cols - w, int((px - w * self.cw / 2) / self.cw)))
+        w, h = card["cols"], card["rows"]
+        c0 = max(0, min(self.cols - w, int((px - card["w"] / 2) / self.tcw)))
         r0 = max(1, min(self.rows - h - 1,
-                        int((py - h * self.ch / 2) / self.ch)))
+                        int((py - card["h"] / 2) / self.tch)))
 
         grid = {}
         for r in range(r0, r0 + h):
@@ -242,13 +344,13 @@ class AnsiDonut(render.DonutRenderer):
         for r in range(r0 + 1, r0 + h - 1):
             grid[(c0, r)] = ("│", col, bg)
             grid[(c0 + w - 1, r)] = ("│", col, bg)
-        for corner, cell in (("┌", (c0, r0)), ("┐", (c0 + w - 1, r0)),
-                             ("└", (c0, r0 + h - 1)),
-                             ("┘", (c0 + w - 1, r0 + h - 1))):
-            grid[cell] = (corner, col, bg)
+        for ch, cell in (("┌", (c0, r0)), ("┐", (c0 + w - 1, r0)),
+                         ("└", (c0, r0 + h - 1)),
+                         ("┘", (c0 + w - 1, r0 + h - 1))):
+            grid[cell] = (ch, col, bg)
         # a TUI titles a box in the box's own top rule
         self._text(grid, c0 + 2, r0, f' {item["label"]} ', col, bg)
-        for k, (txt, fg) in enumerate(body):
+        for k, (txt, fg) in enumerate(card["body"]):
             if txt:
                 self._text(grid, c0 + 3, r0 + 1 + k, txt, fg, bg)
 
@@ -264,15 +366,16 @@ class AnsiDonut(render.DonutRenderer):
         # the value as a double-height line -- DECDHL, the only way a terminal
         # ever had two sizes of type on one screen
         ImageDraw.Draw(self._cv).text(
-            ((c0 + 3) * self.cw, (r0 + 1) * self.ch + self.ch * 0.05),
-            item["display"], font=self.fbig, fill=col)
+            ((c0 + 3) * self.tcw, (r0 + 1) * self.tch), item["display"],
+            font=self.fbig, fill=col)
 
+    # -- the rest of the furniture ------------------------------------------
     def _hole(self, d, alpha) -> None:
         if alpha < 0.02 or not self.total_txt:
             return
         c, r = self._cell(*self.centre)
         ImageDraw.Draw(self._cv).text(
-            ((c - len(self.total_txt)) * self.cw, (r - 1) * self.ch),
+            ((c - len(self.total_txt)) * self.tcw, (r - 1) * self.tch),
             self.total_txt, font=self.fbig, fill=self.th["fg"])
         if self.total_label:
             grid = {}
@@ -305,8 +408,8 @@ class AnsiDonut(render.DonutRenderer):
             return
         grid = {}
         c, r = self._cell(self.vp[0] + self.vp[2] / 2, self.estab_y)
-        self._text(grid, c - len(head) // 2, r + 1, head, self.th["fg"])
-        self._text(grid, c - len(sub) // 2, r + 3, sub, self.th["muted"])
+        self._text(grid, c - len(head) // 2, r, head, self.th["fg"])
+        self._text(grid, c - len(sub) // 2, r + 2, sub, self.th["muted"])
         self._print(grid)
 
     def header(self, d, accent=None) -> None:
@@ -334,8 +437,8 @@ class AnsiDonut(render.DonutRenderer):
             mask = Image.new("L", cv.size, 0)
             md = ImageDraw.Draw(mask)
             for c, r in self._lit_cells:
-                md.rectangle([c * self.cw, r * self.ch,
-                              (c + 1) * self.cw, (r + 1) * self.ch], fill=255)
+                md.rectangle([c * self.rcw, r * self.rch,
+                              (c + 1) * self.rcw, (r + 1) * self.rch], fill=255)
             lit = Image.new("RGB", cv.size, (0, 0, 0))
             lit.paste(cv, mask=mask)
             glow = lit.filter(ImageFilter.GaussianBlur(int(GLOW_PX * self.uk)))
@@ -346,10 +449,14 @@ class AnsiDonut(render.DonutRenderer):
 
 def main():
     out = sys.argv[1]
+    cell = int(sys.argv[2]) if len(sys.argv) > 2 else RING_W
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(ROOT, "examples/memory-breakdown.json")) as fh:
         spec = json.load(fh)
-    r = AnsiDonut(spec, out)
+    r = AnsiDonut(spec, out, cell)
+    print(f"  ring {cell}x{cell * 2}px -> {r.rcols}x{r.rrows} characters, "
+          f"{SS}x{SS} sub-cells each, out of {len(GLYPHS)} glyphs; "
+          f"type {CELL_W}x{CELL_H}px -> {r.cols}x{r.rows}")
     acc, picks = 0.0, {}
     for s in r.timeline:
         if s["kind"] == "intro":
@@ -360,7 +467,7 @@ def main():
     for name in ("intro", "hold0", "hold4"):
         t0 = time.time()
         r.frame(int(picks[name] * r.fps)).save(
-            os.path.join(out, f"ansi-{name}.png"))
+            os.path.join(out, f"ansi{cell}-{name}.png"))
         print(f"  {name:6s} t={picks[name]:5.2f}s  "
               f"{(time.time() - t0) * 1000:.0f}ms")
 
