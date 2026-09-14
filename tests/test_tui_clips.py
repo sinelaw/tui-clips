@@ -474,6 +474,79 @@ def test_donut_refuses_a_spec_it_cannot_draw(tmp):
         check(True, "a donut spec cannot also name capture.panes")
 
 
+def test_donut_ansi_style_is_selected_by_the_spec(tmp):
+    """`style: "ansi"` prints the clip; anything else is refused"""
+    sp = donut_spec()
+    check(type(render.make(sp, {}, os.path.join(tmp, "f"))).__name__
+          == "DonutRenderer", "the default style draws")
+    sp["render"]["donut"]["style"] = "ansi"
+    r = render.make(sp, {}, os.path.join(tmp, "f2"))
+    check(type(r).__name__ == "AnsiDonutRenderer", "ansi style prints")
+    check(r.ramp == render.CHARSETS["unicode"], "and defaults to the full set")
+    # a set is only ever a string, so the characters themselves work too
+    sp["render"]["donut"]["charset"] = "#@ ."
+    check(render.make(sp, {}, os.path.join(tmp, "f3")).ramp == "#@ .",
+          "a literal string is a charset")
+    for bad, why in (({"style": "crt"}, "an unknown style"),
+                     ({"style": "ansi", "charset": "x"}, "a one-character set"),
+                     ({"style": "ansi", "focus": [4, 40]}, "focus the wrong way round")):
+        try:
+            render.make(donut_spec(donut=bad), {}, os.path.join(tmp, "f4"))
+            check(False, f"{why} was accepted")
+        except SystemExit:
+            check(True, f"{why} is refused")
+
+
+def test_donut_ansi_focus_pulls_only_when_the_camera_rests(tmp):
+    """the ring is sharp exactly when it is being looked at.
+
+    A character grid that moves crawls -- cells pop between glyphs as the
+    shape slides under them, and the eye reads the popping rather than the
+    motion. So nothing is ever both sharp and travelling.
+    """
+    sp = donut_spec()
+    sp["render"]["donut"]["style"] = "ansi"
+    r = render.make(sp, {}, os.path.join(tmp, "f"))
+    seen = {}
+    for n in range(int(round(r.total() * r.fps))):
+        s, u, _ = r.at(n / r.fps)
+        f = r.focus_at(s, u, s is r.timeline[-1])
+        seen.setdefault(s["kind"], []).append(f)
+    for kind in ("grow", "move", "regroup"):
+        check(max(seen.get(kind, [0])) == 0.0,
+              f"{kind} is coarse throughout")
+    for kind in ("intro", "hold", "outro"):
+        check(max(seen[kind]) > 0.99, f"{kind} reaches full focus")
+    check(seen["hold"][0] < 0.2 and seen["hold"][-1] < 0.5,
+          "a hold arrives out of focus and lets go before the next travel")
+    check(seen["outro"][-1] > 0.99,
+          "... but the last beat has nothing to let go for")
+    # the grid coarsens monotonically as the focus backs off
+    cells = [r.cell_at(f / 10) for f in range(11)]
+    check(cells == sorted(cells, reverse=True) and cells[0] == r.coarse
+          and cells[-1] == r.fine,
+          f"the cell runs {r.coarse}px -> {r.fine}px without reversing ({cells})")
+
+
+def test_donut_ansi_renders_every_beat(tmp):
+    """every frame prints something, and the sharp ones are not a grid"""
+    sp = donut_spec()
+    sp["render"]["donut"].update({"style": "ansi", "charset": "shades"})
+    r = render.make(sp, {}, os.path.join(tmp, "f"))
+    blank = Image.new("RGB", (r.W, r.H), r.th["bg"])
+    n = int(round(r.total() * r.fps))
+    for k in range(0, n, 3):
+        if ImageChops.difference(r.frame(k), blank).getbbox() is None:
+            check(False, f"frame {k} is empty")
+            return
+    check(True, f"all {n} frames print something")
+    # the characters are measured off the font at the size they are printed,
+    # so the set spans a real range of ink rather than a nominal one
+    ink = [d for _, _, d in r._masks_for(r.fine)]
+    check(ink[0] == 0.0 and ink[-1] > 0.8,
+          f"the set runs from blank to nearly solid ({ink[0]:.2f}..{ink[-1]:.2f})")
+
+
 def test_draft_sizes(tmp):
     """derived, so nobody meets 'width not divisible by 2'"""
     # bin/tui-clip has no .py extension, so it needs its loader naming
