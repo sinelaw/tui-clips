@@ -159,6 +159,101 @@ def make(spec: dict, captures: dict[str, str], outdir: str,
     return Renderer(spec, captures, outdir, shots, runs)
 
 
+
+class CRT:
+    """A phosphor look laid over the finished frame.
+
+    Four cheap things, in the order a real tube does them. Two of them are
+    the ones that actually read as a CRT and two are what stop it looking
+    like a filter:
+
+      * `shift`      the red and blue channels pulled apart by a pixel or
+                     two, which is the convergence error of a three-gun tube
+      * `bloom`      the bright parts bled into their neighbours -- phosphor
+                     glows, it does not stop at the pixel
+      * `scanlines`  every `gap`-th row darkened
+      * `vignette`   the corners taken down, because the screen is curved
+                     even when the image is not
+
+    The masks are built once and reused: they depend only on the canvas, and
+    rebuilding them per frame is most of the cost of the whole pass.
+
+    Scanlines are the part that goes wrong at small sizes. A one-pixel line
+    every three pixels is a moire pattern once the video is scaled down a
+    feed, so the gap comes down with the canvas like every other constant
+    here, and the default is light enough to survive the encode -- a deep
+    comb is the first thing h.264 turns to mush.
+    """
+
+    def __init__(self, cfg, w: int, h: int, k: float = 1.0):
+        cfg = {} if cfg is True else dict(cfg or {})
+        self.scan = float(cfg.get("scanlines", 0.16))
+        self.gap = max(2, int(round(float(cfg.get("gap", 3)) * k)))
+        self.bloom = float(cfg.get("bloom", 0.30))
+        self.blur = max(1.0, float(cfg.get("blur", 7)) * k)
+        self.shift = int(round(float(cfg.get("shift", 2)) * k))
+        self.vig = float(cfg.get("vignette", 0.22))
+        self.w, self.h = w, h
+        self._scan = None
+        self._vig = None
+
+    def scan_mask(self):
+        """one dark row every `gap`, tiled -- built once, reused every frame"""
+        if self._scan is None:
+            if self.scan <= 0:
+                self._scan = Image.new("L", (self.w, self.h), 255)
+            else:
+                tile = Image.new("L", (self.w, self.gap), 255)
+                ImageDraw.Draw(tile).rectangle(
+                    [0, 0, self.w - 1, 0], fill=int(255 * (1.0 - self.scan)))
+                m = Image.new("L", (self.w, self.h), 255)
+                for y in range(0, self.h, self.gap):
+                    m.paste(tile, (0, y))
+                self._scan = m
+        return self._scan
+
+    def vig_mask(self):
+        """bright in the middle, down by `vig` at the corners"""
+        if self._vig is None:
+            if self.vig <= 0:
+                self._vig = Image.new("L", (self.w, self.h), 255)
+            else:
+                # radial_gradient is black at the centre and white at the
+                # edge, which is the shape wanted, inverted and scaled.
+                g = Image.radial_gradient("L").resize((self.w, self.h),
+                                                      Image.BILINEAR)
+                self._vig = g.point(
+                    lambda v: int(255 - self.vig * v))
+        return self._vig
+
+    def __call__(self, im: Image.Image) -> Image.Image:
+        im = im.convert("RGB")
+        if self.shift:
+            r, g, b = im.split()
+            r = ImageChops.offset(r, -self.shift, 0)
+            b = ImageChops.offset(b, self.shift, 0)
+            im = Image.merge("RGB", (r, g, b))
+        if self.bloom > 0:
+            lit = im.point(lambda v: max(0, int((v - 150) * 1.9)))
+            lit = lit.filter(ImageFilter.GaussianBlur(self.blur))
+            if self.bloom < 1.0:
+                lit = lit.point(lambda v: int(v * self.bloom))
+            im = ImageChops.screen(im, lit)
+        if self.scan > 0:
+            im = ImageChops.multiply(im, Image.merge(
+                "RGB", (self.scan_mask(),) * 3))
+        if self.vig > 0:
+            im = ImageChops.multiply(im, Image.merge(
+                "RGB", (self.vig_mask(),) * 3))
+        return im
+
+
+def post_fx(obj, im):
+    """the finished frame, through whatever whole-frame pass the spec asked for"""
+    fx = getattr(obj, "crt_fx", None)
+    return fx(im) if fx is not None else im
+
+
 class Renderer:
     def __init__(self, spec: dict, captures: dict[str, str], outdir: str,
                  shots: dict[str, str] | None = None,
@@ -231,6 +326,8 @@ class Renderer:
         # note points at, whether a pane is wide enough -- are exactly the
         # ones it would get wrong.
         self.dk = float(r.get("draft_scale", 1.0))
+        # A whole-frame pass, applied on the way to disk (see post_fx).
+        self.crt_fx = CRT(r["crt"], self.W, self.H, self.dk) if r.get("crt") else None
         self.header_h = self.k(r.get("header_height", 100))
         self.cap_h = self.k(r.get("caption_height", 130))
         # The bar exists for the beats. A clip whose beats all say their piece
@@ -475,7 +572,12 @@ class Renderer:
         """(scale, source-x, source-y) that frames `rect` in the viewport"""
         a = a or {}
         x0, y0, x1, y1 = rect
-        pad = 2 * self.FIT_PAD
+        # Down with the canvas, like every other pixel constant here. Left
+        # unscaled it is 56px of 1080 in a full render and 56px of 540 in a
+        # draft -- twice the margin -- so a draft framed a rect noticeably
+        # smaller than the render it was standing in for, which is the one
+        # thing a draft must not do.
+        pad = 2 * self.k(self.FIT_PAD)
         note = bool(a.get("note"))
         room = self.note_room() if note else 0
         # Only the note's own axis is reserved. It is dealt sideways off the
@@ -719,8 +821,16 @@ class Renderer:
     # reach an arbitrary rect is just a line drawn over the content. A tag
     # names the beat instead: it sits at a fixed place in the frame, wraps to
     # its own column, and draws no leader at all.
-    TAG_PAD = 26
+    TAG_PAD = 52          # the frame margin a tag keeps, before its own fill
     TAG_GAP = 1.18          # line spacing, in multiples of the line height
+
+    def tone_of(self, v, default):
+        """a theme key, an explicit [r, g, b], or the default"""
+        if isinstance(v, str):
+            return tuple(self.th.get(v, default))
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            return tuple(int(c) for c in v[:3])
+        return tuple(default)
 
     def wrap_tag(self, text: str, font, max_w: int) -> list[str]:
         """greedy wrap; a single word longer than the column keeps its line"""
@@ -766,13 +876,28 @@ class Renderer:
         else:
             y = int((ch - block_h) / 2)
         ld = ImageDraw.Draw(ov)
-        fill = fade_c(self.th.get("fg", (255, 255, 255)), alpha)
-        # A tag lies over the picture with no plate under it, so it is stroked
-        # in the ground colour instead: enough to hold the letterforms apart
-        # from whatever is behind them, without drawing a box that reads as a
-        # second window.
+        fill = fade_c(self.tone_of(t.get("color"), self.th.get("fg")), alpha)
+        widest = max((font.getlength(l) for l in lines), default=0)
+        x0 = (cw - pad - widest) if right else pad
+
+        # `bg` gives the words something to sit on. Over a screen that is
+        # itself text, a fill is what separates one from the other -- a
+        # stroke alone holds the letterforms apart but leaves the rows
+        # showing between them, which reads as two things in one place.
+        bg = t.get("bg")
+        if bg:
+            bp = self.k(int(t.get("bg_pad", 26)))
+            box = [x0 - bp, y - bp, x0 + widest + bp, y + block_h + bp]
+            ld.rounded_rectangle(
+                box, radius=self.k(10),
+                fill=fade_c(self.tone_of(bg if bg is not True else None,
+                                         self.th["bg"]),
+                            int(alpha * float(t.get("bg_alpha", 0.86)))))
+        # Stroked as well when there is no fill: enough to hold the
+        # letterforms apart from whatever is behind them, without drawing a
+        # box that reads as a second window.
+        sw = 0 if bg else self.k(4)
         stroke = fade_c(self.th["bg"], alpha)
-        sw = self.k(4)
         for n, line in enumerate(lines):
             w = font.getlength(line)
             x = (cw - pad - w) if right else pad
@@ -990,7 +1115,7 @@ class Renderer:
 
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def phase(self, t: float):
@@ -1353,34 +1478,13 @@ class Renderer:
         # the band was drawn -- the note is anchored to the beat's rect, which
         # exists either way.
         tvis = min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel)
-        if vis > 0.015 or tvis > 0.015:
+        if vis > 0.015:
             nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-            if vis > 0.015:
-                self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
+            self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
+                         lay.size)
+            if pan > 0:
+                self.callout(nov, nxt, b_next, int(255 * vis * pan), tone_j,
                              lay.size)
-                if pan > 0:
-                    self.callout(nov, nxt, b_next, int(255 * vis * pan), tone_j,
-                                 lay.size)
-            # A tag names the beat, so it has to survive the travel rather
-            # than blink off with the band. Across a *wipe* it rides the edge:
-            # both tags are drawn at full strength and each is clipped to its
-            # own side of the moving line, so the words are replaced in place
-            # exactly as the screen under them is. Cross-fading them instead
-            # would put one word on top of the other -- they share a position,
-            # which is the whole point of them sharing a position.
-            if wipe:
-                ex = int(round(lay.size[0] * pan))
-                for k, box in ((ai, (ex, 0, lay.size[0], lay.size[1])),
-                               (nxt, (0, 0, ex, lay.size[1]))):
-                    if box[2] <= box[0]:
-                        continue
-                    one = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-                    self.tag(one, k, int(255 * tvis), lay.size)
-                    nov.alpha_composite(one.crop(box), (box[0], box[1]))
-            else:
-                self.tag(nov, ai, int(255 * tvis * (1.0 - pan)), lay.size)
-                if pan > 0:
-                    self.tag(nov, nxt, int(255 * tvis * pan), lay.size)
             lay = lay.convert("RGBA")
             lay.alpha_composite(nov)
             lay = lay.convert("RGB")
@@ -1389,6 +1493,38 @@ class Renderer:
         lay = self.vignetted(lay, max(0.0, (p - 0.55) / 0.45))
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
+
+        # Tags are placed against the *frame*, not against the camera's panel.
+        # The panel is whatever size the current scale makes it and is pasted
+        # at an offset, so a tag set flush to the panel's right edge lands
+        # off-screen the moment the panel is wider than the frame -- which is
+        # exactly what a zoomed-in camera produces.
+        #
+        # A tag names the beat, so it survives the travel rather than blinking
+        # off with the band. Across a wipe it rides the edge: both tags are
+        # drawn at full strength and each clipped to its own side of the moving
+        # line, so the words are replaced in place exactly as the screen under
+        # them is. Cross-fading them would put one word on top of the other --
+        # and sharing a position is the whole point of them.
+        if tvis > 0.015 and any(self.ann[k].get("tag") for k in (ai, nxt)):
+            fw, fh = cv.size
+            tov = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+            if wipe:
+                ex = max(0, min(fw, pos[0] + int(round(cwi * pan))))
+                for k, box in ((ai, (ex, 0, fw, fh)), (nxt, (0, 0, ex, fh))):
+                    if box[2] <= box[0]:
+                        continue
+                    one = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+                    self.tag(one, k, int(255 * tvis), (fw, fh))
+                    tov.alpha_composite(one.crop(box), (box[0], box[1]))
+            else:
+                self.tag(tov, ai, int(255 * tvis * (1.0 - pan)), (fw, fh))
+                if pan > 0:
+                    self.tag(tov, nxt, int(255 * tvis * pan), (fw, fh))
+            cv = cv.convert("RGBA")
+            cv.alpha_composite(tov)
+            cv = cv.convert("RGB")
+            d = ImageDraw.Draw(cv)
         if p < 0.9 and not self.vignette and not self.chrome:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
                         outline=th["panel_border"], width=self.k(2))
@@ -2138,7 +2274,7 @@ class ExplodeRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:
@@ -2891,7 +3027,7 @@ class DonutRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:

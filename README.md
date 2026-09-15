@@ -590,6 +590,30 @@ for the same reason. Its strength follows the zoom, so the intro's framed
 panel keeps the crisp border it is drawn with. `VIG_X`, `VIG_Y` and
 `VIG_BLUR` on the renderer are the knobs.
 
+## The phosphor pass
+
+`render.crt` puts a tube in front of the whole video — every finished frame,
+on the way to disk:
+
+```jsonc
+"crt": {"scanlines": 0.14, "gap": 3, "bloom": 0.28, "shift": 2,
+        "vignette": 0.26}
+```
+
+Four things, in the order a real one does them. Two of them read as a CRT and
+two are what stop it looking like a filter: `shift` pulls the red and blue
+channels apart by a pixel or two (the convergence error of a three-gun tube),
+`bloom` bleeds the bright parts into their neighbours (phosphor glows, it does
+not stop at the pixel), `scanlines` darkens every `gap`-th row, and `vignette`
+takes the corners down because the screen is curved even when the image is
+not. `"crt": true` takes the defaults.
+
+Keep the comb light. A deep one is the first thing h.264 turns to mush, and a
+one-pixel line every three pixels is a moire pattern once the video is scaled
+down a feed — so `gap` comes down with the canvas like every other constant
+here, and the masks are built once rather than per frame, which is most of
+what the pass would otherwise cost.
+
 ## Notes: saying it beside the thing
 
 **Say it in the frame, not in a bar under it.** A caption bar across the foot
@@ -649,14 +673,25 @@ column, and draws no leader at all:
 
 ```jsonc
 {"tag": {"text": "organize into folders", "at": "center-right",
-         "width": 0.34, "size": 58}}
+         "width": 0.40, "size": 58, "color": "after", "bg": true}}
 ```
 
 `at` is `center|top|bottom` crossed with `left|right` (default
 `center-right`), `width` is the wrapping column as a share of the frame, and
-`size` overrides `render.note_size`. The words are stroked in the ground
-colour rather than set on a plate: enough to hold the letterforms apart from
-whatever is behind them, without drawing a box that reads as a second window.
+`size` overrides `render.note_size`. `color` and `bg` each take a theme key
+(`after`, `fg`, `bg`, …) or an explicit `[r, g, b]`; `bg: true` uses the
+theme's ground.
+
+Without a `bg` the words are stroked in the ground colour instead: enough to
+hold the letterforms apart from whatever is behind them, without drawing a
+box that reads as a second window. Over a screen that is *itself* text a
+stroke is not enough — the rows keep showing between the letters, which reads
+as two things in one place — so give it a fill.
+
+A tag is placed against the **frame**, not against the camera's panel. The
+panel is whatever size the current scale makes it and is pasted at an offset,
+so a tag set flush to the panel's edge lands off-screen the moment the camera
+is zoomed in far enough for the panel to be wider than the frame.
 
 Unlike a note, a tag survives the travel between beats -- a beat's name
 should not blink off while the screen it names is arriving.
