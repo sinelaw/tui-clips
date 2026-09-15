@@ -159,6 +159,240 @@ def make(spec: dict, captures: dict[str, str], outdir: str,
     return Renderer(spec, captures, outdir, shots, runs)
 
 
+
+class CRT:
+    """A phosphor look laid over the finished frame.
+
+    Four cheap things, in the order a real tube does them. Two of them are
+    the ones that actually read as a CRT and two are what stop it looking
+    like a filter:
+
+      * `shift`      the red and blue channels pulled apart by a pixel or
+                     two, which is the convergence error of a three-gun tube
+      * `bloom`      the bright parts bled into their neighbours -- phosphor
+                     glows, it does not stop at the pixel
+      * `scanlines`  every `gap`-th row darkened
+      * `vignette`   the corners taken down, because the screen is curved
+                     even when the image is not
+
+    The masks are built once and reused: they depend only on the canvas, and
+    rebuilding them per frame is most of the cost of the whole pass.
+
+    Scanlines are the part that goes wrong at small sizes. A one-pixel line
+    every three pixels is a moire pattern once the video is scaled down a
+    feed, so the gap comes down with the canvas like every other constant
+    here, and the default is light enough to survive the encode -- a deep
+    comb is the first thing h.264 turns to mush.
+    """
+
+    def __init__(self, cfg, w: int, h: int, k: float = 1.0):
+        cfg = {} if cfg is True else dict(cfg or {})
+        self.scan = float(cfg.get("scanlines", 0.34))
+        self.gap = max(2, int(round(float(cfg.get("gap", 4)) * k)))
+        self.bloom = float(cfg.get("bloom", 0.55))
+        self.blur = max(1.0, float(cfg.get("blur", 9)) * k)
+        self.shift = int(round(float(cfg.get("shift", 3)) * k))
+        self.vig = float(cfg.get("vignette", 0.45))
+        self.curve = float(cfg.get("curve", 0.10))
+        self.cells = int(cfg.get("cells", 24))
+        # Seconds of power-off at the end of the clip. 0 to hold instead.
+        self.shutdown = float(cfg.get("shutdown", 0.0))
+        self.off_color = tuple(cfg.get("off_color", (223, 255, 233)))
+        # How hard the dying raster blooms. It is the brightest thing in the
+        # clip by a long way, so it gets its own number rather than riding
+        # the `bloom` used for ordinary phosphor.
+        self.off_glow = float(cfg.get("off_glow", 1.35))
+        self.kk = k
+        self.w, self.h = w, h
+        self._scan = None
+        self._vig = None
+        self._mesh = None
+        self._halo = {}
+
+    def scan_mask(self):
+        """one dark row every `gap`, tiled -- built once, reused every frame"""
+        if self._scan is None:
+            if self.scan <= 0:
+                self._scan = Image.new("L", (self.w, self.h), 255)
+            else:
+                tile = Image.new("L", (self.w, self.gap), 255)
+                ImageDraw.Draw(tile).rectangle(
+                    [0, 0, self.w - 1, 0], fill=int(255 * (1.0 - self.scan)))
+                m = Image.new("L", (self.w, self.h), 255)
+                for y in range(0, self.h, self.gap):
+                    m.paste(tile, (0, y))
+                self._scan = m
+        return self._scan
+
+    def vig_mask(self):
+        """bright in the middle, down by `vig` at the corners"""
+        if self._vig is None:
+            if self.vig <= 0:
+                self._vig = Image.new("L", (self.w, self.h), 255)
+            else:
+                # radial_gradient is black at the centre and white at the
+                # edge, which is the shape wanted, inverted and scaled.
+                g = Image.radial_gradient("L").resize((self.w, self.h),
+                                                      Image.BILINEAR)
+                self._vig = g.point(
+                    lambda v: int(255 - self.vig * v))
+        return self._vig
+
+    def halo(self, d: int):
+        """a radial glow sprite `d` across, cached by size.
+
+        The dot at the end needs its own, because a blur cannot give it one.
+        A Gaussian conserves energy: spread five bright pixels over a radius
+        of fifty and what comes back is arithmetically correct and visually
+        nothing. The line and the squeezed raster are large enough sources to
+        survive that; the dot is not, and it is the one frame everybody
+        remembers about a CRT going off.
+        """
+        if d not in self._halo:
+            g = Image.radial_gradient("L").resize((d, d), Image.BILINEAR)
+            # 0 at the centre, 255 at the edge -- inverted, and squared up so
+            # the falloff is a glow rather than a flat disc
+            self._halo[d] = g.point(lambda v: max(0, 255 - int(v * 1.9)))
+        return self._halo[d]
+
+    def mesh(self):
+        """the barrel warp, as a grid of quads -- built once per canvas.
+
+        The curve is the trait that actually says "tube". Scanlines and a
+        vignette on a flat rectangle read as a filter laid over a screenshot;
+        bending the raster is what makes it a thing with glass in front of it.
+
+        Each destination cell samples from a source quad pushed outward by
+        `1 + curve*r²`, so the middle is near enough untouched and the corners
+        reach past the edge of the image and come back black -- which is the
+        rounded-off corner of the tube, for free.
+        """
+        if self._mesh is None:
+            k, w, h, n = self.curve, self.w, self.h, self.cells
+            quads = []
+            for gy in range(n):
+                for gx in range(n):
+                    x0, x1 = w * gx / n, w * (gx + 1) / n
+                    y0, y1 = h * gy / n, h * (gy + 1) / n
+                    src = []
+                    # MESH wants the source quad as nw, sw, se, ne
+                    for px, py in ((x0, y0), (x0, y1), (x1, y1), (x1, y0)):
+                        u, v = (px / w) * 2 - 1, (py / h) * 2 - 1
+                        f = 1.0 + k * (u * u + v * v)
+                        src += [(u * f + 1) / 2 * w, (v * f + 1) / 2 * h]
+                    quads.append(((int(round(x0)), int(round(y0)),
+                                   int(round(x1)), int(round(y1))), tuple(src)))
+            self._mesh = quads
+        return self._mesh
+
+    def power_off(self, im: Image.Image, q: float) -> Image.Image:
+        """the tube losing its deflection, over `q` in 0..1.
+
+        A CRT does not fade out, it collapses. The vertical deflection gives
+        up first and the whole raster is squeezed into one over-bright
+        horizontal line -- the same beam energy over a fraction of the
+        height, which is why it gets brighter as it gets thinner rather than
+        dimmer. Then the horizontal deflection goes and the line shortens to
+        a dot, and the dot sits there on the phosphor for a moment after
+        there is nothing driving it.
+
+        Doing it in that order is the whole effect. Fading the picture to
+        black and calling it a power-off is what it looks like when someone
+        has only ever seen it described.
+        """
+        w, h = im.size
+        q = max(0.0, min(1.0, q))
+        out = Image.new("RGB", (w, h), (0, 0, 0))
+        lh = max(2, int(round(3 * self.kk)))
+        cx, cy = w // 2, h // 2
+        if q < 0.42:                                  # the raster squeezes
+            t = q / 0.42
+            hh = max(lh, int(h * (1.0 - t) ** 2.3))
+            band = im.resize((w, hh), Image.BILINEAR)
+            band = band.point(lambda v: min(255, int(v * (1.0 + 3.0 * t))))
+            out.paste(band, (0, (h - hh) // 2))
+        elif q < 0.76:                                # the line shortens
+            t = (q - 0.42) / 0.34
+            ww = max(2, int(w * (1.0 - t) ** 1.4))
+            ImageDraw.Draw(out).rectangle(
+                [cx - ww // 2, cy - lh // 2, cx + ww // 2, cy + lh // 2],
+                fill=self.off_color)
+        else:                                         # the dot decays
+            t = (q - 0.76) / 0.24
+            fade = (1.0 - t) ** 1.5
+            r = max(1, int(lh * 1.7 * (1.0 - t)))
+            c = tuple(int(v * fade) for v in self.off_color)
+            # the halo first, so the dot itself sits on top of it
+            hd = max(8, int((lh * 26 * (1.0 - t) + 10) * self.kk)) | 1
+            sprite = Image.new("RGB", (hd, hd),
+                               tuple(int(v * fade * 0.85)
+                                     for v in self.off_color))
+            glow = Image.new("RGB", (w, h), (0, 0, 0))
+            glow.paste(sprite, (cx - hd // 2, cy - hd // 2), self.halo(hd))
+            out = ImageChops.screen(out, glow)
+            ImageDraw.Draw(out).ellipse([cx - r, cy - r, cx + r, cy + r],
+                                        fill=c)
+        # Two radii, not one: a tight halo for the shape and a wide one for
+        # the wash it throws on the glass. A single blur wide enough to give
+        # the wash loses the hard edge of the line, and one tight enough to
+        # keep the edge does not spill at all.
+        r = self.blur * 2.0
+        tight = out.filter(ImageFilter.GaussianBlur(r))
+        wide = out.filter(ImageFilter.GaussianBlur(r * 3.2))
+        glow = ImageChops.add(tight.point(lambda v: int(v * 0.95)),
+                              wide.point(lambda v: int(v * 0.75)))
+        if self.off_glow != 1.0:
+            glow = glow.point(lambda v: min(255, int(v * self.off_glow)))
+        return ImageChops.screen(out, glow)
+
+    def __call__(self, im: Image.Image, q=None) -> Image.Image:
+        im = im.convert("RGB")
+        if self.shift:
+            r, g, b = im.split()
+            r = ImageChops.offset(r, -self.shift, 0)
+            b = ImageChops.offset(b, self.shift, 0)
+            im = Image.merge("RGB", (r, g, b))
+        if self.bloom > 0:
+            lit = im.point(lambda v: max(0, int((v - 150) * 1.9)))
+            lit = lit.filter(ImageFilter.GaussianBlur(self.blur))
+            if self.bloom < 1.0:
+                lit = lit.point(lambda v: int(v * self.bloom))
+            im = ImageChops.screen(im, lit)
+        if self.scan > 0:
+            im = ImageChops.multiply(im, Image.merge(
+                "RGB", (self.scan_mask(),) * 3))
+        # Curve last of the geometry, so the scanlines bend with the raster
+        # rather than staying flat behind a warped picture.
+        if self.curve > 0:
+            im = im.transform((self.w, self.h), Image.MESH, self.mesh(),
+                              Image.BILINEAR, fillcolor=(0, 0, 0))
+        if self.vig > 0:
+            im = ImageChops.multiply(im, Image.merge(
+                "RGB", (self.vig_mask(),) * 3))
+        # Last, and over the finished tube: it is the tube that is dying.
+        if q is not None:
+            im = self.power_off(im, q)
+        return im
+
+
+def post_fx(obj, im, n=None, nf=None):
+    """the finished frame, through whatever whole-frame pass the spec asked for.
+
+    `n` and `nf` are only needed by a pass that has to know where the end is
+    -- at present the CRT's power-off, which takes the last `shutdown`
+    seconds of the clip rather than adding any.
+    """
+    fx = getattr(obj, "crt_fx", None)
+    if fx is None:
+        return im
+    q = None
+    if fx.shutdown > 0 and n is not None and nf:
+        start = nf - int(round(fx.shutdown * float(getattr(obj, "fps", 60))))
+        if n >= start:
+            q = (n - start) / float(max(1, nf - 1 - start))
+    return fx(im, q)
+
+
 class Renderer:
     def __init__(self, spec: dict, captures: dict[str, str], outdir: str,
                  shots: dict[str, str] | None = None,
@@ -231,6 +465,8 @@ class Renderer:
         # note points at, whether a pane is wide enough -- are exactly the
         # ones it would get wrong.
         self.dk = float(r.get("draft_scale", 1.0))
+        # A whole-frame pass, applied on the way to disk (see post_fx).
+        self.crt_fx = CRT(r["crt"], self.W, self.H, self.dk) if r.get("crt") else None
         self.header_h = self.k(r.get("header_height", 100))
         self.cap_h = self.k(r.get("caption_height", 130))
         # The bar exists for the beats. A clip whose beats all say their piece
@@ -303,6 +539,18 @@ class Renderer:
                 raise SystemExit(
                     f"annotation shot {a['shot']!r} was never taken; add "
                     f'{{"shot": "{a["shot"]}"}} to capture.keys')
+            sw = a.get("swipe")
+            if sw:
+                if not sw.get("to"):
+                    raise SystemExit('annotation swipe needs a "to" shot')
+                if sw["to"] not in self.shots:
+                    raise SystemExit(
+                        f"annotation swipe.to {sw['to']!r} was never taken; "
+                        f'add {{"shot": "{sw["to"]}"}} to capture.keys')
+                if not sw.get("rows"):
+                    raise SystemExit(
+                        'annotation swipe needs "rows": the row indices to '
+                        "wipe, in the order they should go")
         self.cap_intro = r.get("intro_caption", ["", ""])
         self.cap_outro = r.get("outro_caption", ["", ""])
         lb = dict(DEFAULT_LABELS)
@@ -364,11 +612,17 @@ class Renderer:
     def gap(self, i: int) -> float:
         """the travel out of beat i.
 
-        A push moves a whole screen the width of the frame, which wants longer
-        than the cross-fade a pan is, so it takes its own timing.
+        A push moves a whole screen the width of the frame, and a wipe drags
+        an edge across it; both want longer than the cross-fade a pan is, so
+        both take their own timing. `wipe` falls back to `push`'s, which is
+        the right order of magnitude for the same reason.
         """
-        if i + 1 < len(self.ann) and self.ann[i + 1].get("transition") == "push":
-            return float(self.t["push"])
+        if i + 1 < len(self.ann):
+            t = self.ann[i + 1].get("transition")
+            if t == "push":
+                return float(self.t["push"])
+            if t == "wipe":
+                return float(self.t.get("wipe", self.t["push"]))
         return float(self.t["pan"])
 
     def total(self) -> float:
@@ -457,7 +711,12 @@ class Renderer:
         """(scale, source-x, source-y) that frames `rect` in the viewport"""
         a = a or {}
         x0, y0, x1, y1 = rect
-        pad = 2 * self.FIT_PAD
+        # Down with the canvas, like every other pixel constant here. Left
+        # unscaled it is 56px of 1080 in a full render and 56px of 540 in a
+        # draft -- twice the margin -- so a draft framed a rect noticeably
+        # smaller than the render it was standing in for, which is the one
+        # thing a draft must not do.
+        pad = 2 * self.k(self.FIT_PAD)
         note = bool(a.get("note"))
         room = self.note_room() if note else 0
         # Only the note's own axis is reserved. It is dealt sideways off the
@@ -521,11 +780,77 @@ class Renderer:
 
     def screen(self, i: int, hp: float, s: float):
         """beat i's scaled screen at hold-progress `hp`"""
+        if self.ann[i].get("swipe"):
+            return self.swiped(i, hp, s)
         sh = self.shot(i, hp)
         base = self.scaled(sh[0], s, sh[1])
         if len(sh) == 5:
             base = Image.blend(base, self.scaled(sh[2], s, sh[3]), sh[4])
         return base
+
+    def swiped(self, i: int, hp: float, s: float):
+        """beat i's screen with a row-wise wipe from `shot` to `swipe.to`.
+
+        A dissolve between two screens that differ only in the *text of some
+        rows* reads as a blur, not as a change: both strings are legible at
+        once through the middle of it and the eye cannot tell which is
+        arriving. A wipe with a hard edge can only ever show one of them per
+        pixel, so the new name is unambiguous the moment it appears.
+
+        Staggering the rows is what makes it read as a sequence of separate
+        edits rather than one repaint. Each named row runs its own wipe,
+        `row` seconds long, starting `stagger` seconds after the row above --
+        so the times are in seconds and follow the beat's `hold` rather than
+        being a share of it, which is what lets a cascade keep its cadence
+        when the hold is retimed.
+
+        The two screens must be the same capture geometry, which for two
+        `shot`s of one take they always are. Rows are wiped in the order
+        given, not in the order they sit on screen; a caller stepping down a
+        list just lists them in that order.
+        """
+        a = self.ann[i]
+        sw = a["swipe"]
+        src = a.get("shot")
+        A = self.scaled(self.shots[src], s, f"shot:{src}") if src else \
+            self.scaled(self.A, s, "A")
+        B = self.scaled(self.shots[sw["to"]], s, f"shot:{sw['to']}")
+        rows = [int(r) for r in sw.get("rows", [])]
+        if not rows:
+            return A
+        t = hp * self.hold(i)
+        t0 = float(sw.get("at", 0.0))
+        dur = float(sw.get("row", 0.2))
+        stag = float(sw.get("stagger", 0.1))
+        edge = int(sw.get("edge", 3))
+        ec = sw.get("edge_color") or self.th["after"]
+
+        W, H = A.size
+        rh = self.RH * s
+        out = A.copy()
+        mask = Image.new("L", A.size, 0)
+        md = ImageDraw.Draw(mask)
+        moving = []
+        for k, r in enumerate(rows):
+            p = (t - (t0 + k * stag)) / dur if dur > 0 else 1.0
+            p = 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
+            if p <= 0.0:
+                continue
+            y0 = int(round(r * rh))
+            y1 = int(round((r + 1) * rh))
+            if y1 <= 0 or y0 >= H:
+                continue
+            x = int(round(W * p))
+            md.rectangle([0, max(0, y0), x, min(H, y1) - 1], fill=255)
+            if 0.0 < p < 1.0 and edge > 0:
+                moving.append((x, y0, y1))
+        out.paste(B, (0, 0), mask)
+        if moving:
+            d = ImageDraw.Draw(out)
+            for x, y0, y1 in moving:
+                d.rectangle([max(0, x - edge), max(0, y0),
+                             x, min(H, y1) - 1], fill=tuple(ec))
+        return out
 
     # The pointer, in units of its own height: the classic arrow. Drawn
     # rather than screenshotted because X keeps the cursor out of a window
@@ -626,6 +951,131 @@ class Renderer:
         if head and rest and not head.isascii():
             return head, rest
         return None, note
+
+
+    # A tag is the other way to put words on a picture. A note points: it is
+    # anchored to a rect and carries a leader back to it, which is right when
+    # the words are about one row and wrong when they name the whole beat --
+    # there the leader has nothing to single out, and crossing the picture to
+    # reach an arbitrary rect is just a line drawn over the content. A tag
+    # names the beat instead: it sits at a fixed place in the frame, wraps to
+    # its own column, and draws no leader at all.
+    TAG_PAD = 52          # the frame margin a tag keeps, before its own fill
+    TAG_GAP = 1.18          # line spacing, in multiples of the line height
+
+    def tone_of(self, v, default):
+        """a theme key, an explicit [r, g, b], or the default"""
+        if isinstance(v, str):
+            return tuple(self.th.get(v, default))
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            return tuple(int(c) for c in v[:3])
+        return tuple(default)
+
+    def wrap_tag(self, text: str, font, max_w: int, eh: int = 0) -> list[list]:
+        """greedy wrap into lines of tokens.
+
+        A token is either a word or an emoji, because a colour emoji cannot
+        be part of a text run -- Noto's are bitmaps cut at one size, so they
+        are drawn separately and pasted. Measuring has to know that too, or a
+        line ending in one wraps as though the emoji were zero wide.
+
+        -> [[(kind, text, width), ...], ...] with kind in {"t", "e"}.
+        A single token wider than the column keeps its own line.
+        """
+        sp = font.getlength(" ")
+        lines, cur, w = [], [], 0.0
+        for word in str(text).split():
+            if eh and word and not word.isascii():
+                img = self.emoji(word, eh)
+                tok = ("e", word, float(img.width) if img else 0.0)
+            else:
+                tok = ("t", word, float(font.getlength(word)))
+            adv = tok[2] + (sp if cur else 0)
+            if cur and w + adv > max_w:
+                lines.append(cur); cur, w = [tok], tok[2]
+            else:
+                cur.append(tok); w += adv
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def tag(self, ov, i: int, alpha: int, size) -> None:
+        """beat i's tag, set against an edge of the frame"""
+        a = self.ann[i]
+        t = a.get("tag")
+        if not t or alpha <= 4:
+            return
+        t = {"text": t} if isinstance(t, str) else dict(t)
+        text = t.get("text", "")
+        if not text:
+            return
+        at = str(t.get("at", "center-right"))
+        font = (self.f_note if not t.get("size") else
+                ImageFont.truetype(BOLD, self.k(int(t["size"]))))
+        cw, ch = size
+        pad = self.k(self.TAG_PAD)
+        # The column is a share of the frame, so the same tag wraps the same
+        # way whatever the canvas is -- a draft is a faithful miniature.
+        col = int(cw * float(t.get("width", 0.42)))
+        asc, desc = font.getmetrics()
+        lh = asc + desc
+        eh = int(asc * 0.96)
+        lines = self.wrap_tag(text, font, col, eh)
+        step = int(lh * self.TAG_GAP)
+        block_h = step * (len(lines) - 1) + lh
+        sp = font.getlength(" ")
+
+        def line_w(toks):
+            return sum(k[2] for k in toks) + sp * max(0, len(toks) - 1)
+        right = not at.endswith("left")
+        if "top" in at:
+            y = pad
+        elif "bottom" in at:
+            y = ch - pad - block_h
+        else:
+            y = int((ch - block_h) / 2)
+        ld = ImageDraw.Draw(ov)
+        fill = fade_c(self.tone_of(t.get("color"), self.th.get("fg")), alpha)
+        widest = max((line_w(l) for l in lines), default=0)
+        x0 = (cw - pad - widest) if right else pad
+
+        # `bg` gives the words something to sit on. Over a screen that is
+        # itself text, a fill is what separates one from the other -- a
+        # stroke alone holds the letterforms apart but leaves the rows
+        # showing between them, which reads as two things in one place.
+        bg = t.get("bg")
+        if bg:
+            bp = self.k(int(t.get("bg_pad", 26)))
+            box = [x0 - bp, y - bp, x0 + widest + bp, y + block_h + bp]
+            ld.rounded_rectangle(
+                box, radius=self.k(10),
+                fill=fade_c(self.tone_of(bg if bg is not True else None,
+                                         self.th["bg"]),
+                            int(alpha * float(t.get("bg_alpha", 0.86)))))
+        # Stroked as well when there is no fill: enough to hold the
+        # letterforms apart from whatever is behind them, without drawing a
+        # box that reads as a second window.
+        sw = 0 if bg else self.k(4)
+        stroke = fade_c(self.th["bg"], alpha)
+        for n, toks in enumerate(lines):
+            x = (cw - pad - line_w(toks)) if right else pad
+            ly = y + n * step
+            for kind, word, tw in toks:
+                if kind == "e":
+                    img = self.emoji(word, eh)
+                    if img is not None:
+                        # Baseline-ish: sat on the text's ascent rather than
+                        # its box, or it floats above a line of lower-case.
+                        cell = img.copy()
+                        if alpha < 255:
+                            a = cell.getchannel("A").point(
+                                lambda v: int(v * alpha / 255))
+                            cell.putalpha(a)
+                        ov.alpha_composite(cell, (int(x), int(ly + asc - eh)))
+                else:
+                    ld.text((x, ly), word, font=font, fill=fill,
+                            stroke_width=sw, stroke_fill=stroke)
+                x += tw + sp
 
     def callout(self, nov, i: int, b, alpha: int, tone, size):
         ld = ImageDraw.Draw(nov)
@@ -838,7 +1288,7 @@ class Renderer:
 
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def phase(self, t: float):
@@ -1096,12 +1546,40 @@ class Renderer:
         # also travelling reads as a stumble, and the point of the shape is
         # that one thing *replaced* another, not that one became it.
         push = pan > 0 and self.ann[nxt].get("transition") == "push"
+        # A wipe replaces the screen with a hard edge travelling across it,
+        # the same language the row-level `swipe` uses: one screen per pixel,
+        # never a blend of both. A dissolve between two screens of the same
+        # list reads as a smear, and a push slides the whole picture sideways
+        # -- which says "another screen" when what happened is "this screen,
+        # changed".
+        wipe = pan > 0 and self.ann[nxt].get("transition") == "wipe"
         if push:
             for k, hpk, off in ((ai, 1.0, -pan * cwi), (nxt, 0.0, (1 - pan) * cwi)):
                 sk, sxk, syk = self.cam(k)
                 lay.paste(self.screen(k, hpk, sk),
                           (int(round(cwi / 2 - sxk * sk + off)),
                            int(round(chi / 2 - syk * sk))))
+        elif wipe:
+            for k, hpk in ((ai, 1.0), (nxt, 0.0)):
+                sk, sxk, syk = self.cam(k)
+                at = (int(round(cwi / 2 - sxk * sk)),
+                      int(round(chi / 2 - syk * sk)))
+                img = self.screen(k, hpk, sk)
+                if k == ai:
+                    lay.paste(img, at)
+                    continue
+                edge_x = int(round(cwi * pan))
+                inc = Image.new("RGB", (cwi, chi),
+                                self.chrome.fill if self.chrome else th["bg"])
+                inc.paste(img, at)
+                mask = Image.new("L", (cwi, chi), 0)
+                ImageDraw.Draw(mask).rectangle([0, 0, edge_x, chi - 1], fill=255)
+                lay.paste(inc, (0, 0), mask)
+                ew = self.k(4)
+                if 0 < edge_x < cwi:
+                    ImageDraw.Draw(lay).rectangle(
+                        [max(0, edge_x - ew), 0, edge_x, chi - 1],
+                        fill=tuple(self.th[self.ann[nxt].get("tone", "after")]))
         else:
             base = self.screen(ai, 1.0 if pan > 0 else hp, s)
             if pan > 0:
@@ -1113,7 +1591,7 @@ class Renderer:
         # The pointer goes on the screen, under the annotation layer: it is
         # part of what was filmed, so the dim that falls on the screen falls
         # on it too.
-        if self.cursor_cfg is not None and not push:
+        if self.cursor_cfg is not None and not push and not wipe:
             cov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
             drew = False
             for k, alpha in ((ai, int(255 * (1.0 - pan))), (nxt, int(255 * pan))):
@@ -1142,7 +1620,7 @@ class Renderer:
         # turned the band off to let pure motion speak lost its note with it,
         # and the words had to go on the beats either side -- describing the
         # movement before and after the frames that showed it.
-        vis = 0.0 if push else (min(1.0, max(0.0, (p - 0.55) / 0.45))
+        vis = 0.0 if (push or wipe) else (min(1.0, max(0.0, (p - 0.55) / 0.45))
                                 * (1.0 - rel))
         tone_i = self.th[self.ann[ai].get("tone", "after")]
         tone_j = self.th[self.ann[nxt].get("tone", "after")]
@@ -1172,6 +1650,7 @@ class Renderer:
         # incoming one rather than overwrite it. The pass runs whether or not
         # the band was drawn -- the note is anchored to the beat's rect, which
         # exists either way.
+        tvis = min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel)
         if vis > 0.015:
             nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
             self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
@@ -1187,6 +1666,38 @@ class Renderer:
         lay = self.vignetted(lay, max(0.0, (p - 0.55) / 0.45))
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
+
+        # Tags are placed against the *frame*, not against the camera's panel.
+        # The panel is whatever size the current scale makes it and is pasted
+        # at an offset, so a tag set flush to the panel's right edge lands
+        # off-screen the moment the panel is wider than the frame -- which is
+        # exactly what a zoomed-in camera produces.
+        #
+        # A tag names the beat, so it survives the travel rather than blinking
+        # off with the band. Across a wipe it rides the edge: both tags are
+        # drawn at full strength and each clipped to its own side of the moving
+        # line, so the words are replaced in place exactly as the screen under
+        # them is. Cross-fading them would put one word on top of the other --
+        # and sharing a position is the whole point of them.
+        if tvis > 0.015 and any(self.ann[k].get("tag") for k in (ai, nxt)):
+            fw, fh = cv.size
+            tov = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+            if wipe:
+                ex = max(0, min(fw, pos[0] + int(round(cwi * pan))))
+                for k, box in ((ai, (ex, 0, fw, fh)), (nxt, (0, 0, ex, fh))):
+                    if box[2] <= box[0]:
+                        continue
+                    one = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+                    self.tag(one, k, int(255 * tvis), (fw, fh))
+                    tov.alpha_composite(one.crop(box), (box[0], box[1]))
+            else:
+                self.tag(tov, ai, int(255 * tvis * (1.0 - pan)), (fw, fh))
+                if pan > 0:
+                    self.tag(tov, nxt, int(255 * tvis * pan), (fw, fh))
+            cv = cv.convert("RGBA")
+            cv.alpha_composite(tov)
+            cv = cv.convert("RGB")
+            d = ImageDraw.Draw(cv)
         if p < 0.9 and not self.vignette and not self.chrome:
             d.rectangle([pos[0], pos[1], pos[0] + cwi - 1, pos[1] + chi - 1],
                         outline=th["panel_border"], width=self.k(2))
@@ -1936,7 +2447,7 @@ class ExplodeRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:
@@ -2689,7 +3200,7 @@ class DonutRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            self.frame(n).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:

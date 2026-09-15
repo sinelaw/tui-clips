@@ -140,6 +140,12 @@ def step_argv(step: dict, pane: str, shots_dir: str, ctx: dict) -> list[str]:
         return ["--type", json.dumps(d) if len(d) > 1 else step["type"]]
     if "sleep" in step:
         return ["--sleep", str(step["sleep"])]
+    if "at" in step:
+        # Absolute: be here `at` seconds past the last {"mark": true},
+        # whatever the steps in between cost. See tui-capture.
+        return ["--at", str(step["at"])]
+    if step.get("mark"):
+        return ["--mark"]
     if "shot" in step:
         return ["--shot", shot_path(step["shot"], pane, shots_dir, ctx)]
     if "record" in step:

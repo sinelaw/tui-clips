@@ -590,6 +590,74 @@ for the same reason. Its strength follows the zoom, so the intro's framed
 panel keeps the crisp border it is drawn with. `VIG_X`, `VIG_Y` and
 `VIG_BLUR` on the renderer are the knobs.
 
+## The phosphor pass
+
+`render.crt` puts a tube in front of the whole video — every finished frame,
+on the way to disk:
+
+```jsonc
+"crt": {"scanlines": 0.34, "gap": 4, "bloom": 0.55, "shift": 3,
+        "vignette": 0.45, "curve": 0.11}
+```
+
+`"crt": true` takes the defaults, which are those. Five things, in the order
+a real one does them:
+
+| key | what it is |
+|---|---|
+| `shift` | red and blue pulled apart, the convergence error of a three-gun tube |
+| `bloom` | the bright parts bled into their neighbours — phosphor glows, it does not stop at the pixel |
+| `scanlines` | every `gap`-th row darkened |
+| `curve` | the raster bent, corners reaching past the edge and coming back black |
+| `vignette` | the corners taken down |
+
+**`curve` is the one that does the work.** Scanlines and a vignette on a flat
+rectangle read as a filter laid over a screenshot; bending the raster is what
+makes it a thing with glass in front of it, and it brings the rounded-off
+corner of the tube with it for free. The first version of this pass had
+everything but the curve and was politely described as not visible.
+
+### Powering it off
+
+`"shutdown": 1.5` spends the last second and a half of the clip turning the
+tube off instead of holding the last frame and fading:
+
+    the raster squeezes vertically into one over-bright horizontal line
+    -> the line shortens to a dot
+    -> the dot decays on the phosphor
+
+The order is the whole effect, and so is the brightening: it is the same beam
+energy over a fraction of the height, which is why a dying CRT gets *brighter*
+as it collapses rather than dimmer. Fading the picture to black instead is
+what a power-off looks like to someone who has only ever read a description
+of one.
+
+`off_glow` scales the bloom on the dying raster, which is the brightest thing
+in the clip by a long way and so gets its own number rather than riding the
+`bloom` used for ordinary phosphor. It is thrown at two radii: a tight halo
+for the shape and a wide one for the wash on the glass. One blur wide enough
+to give the wash loses the hard edge of the line; one tight enough to keep
+the edge does not spill at all.
+
+The dot at the end is drawn with an explicit halo rather than a blurred one,
+and the reason generalises. **A Gaussian conserves energy**, so blurring a
+five-pixel dot over a fifty-pixel radius returns something arithmetically
+correct and visually black. The squeezed raster and the line are large enough
+sources to survive that treatment; the dot is not, and it is the frame
+everybody remembers about a CRT going off. Anywhere else a small bright thing
+needs to glow, blur is the wrong instrument — composite a sprite.
+
+It takes the end of the clip rather than adding to it, so whatever is left of
+the last beat in front of it is the final hold — lengthen that beat if you
+want longer on the finished screen, and remember that shortening `shutdown`
+moves the collapse *later*, not the ending sooner.
+
+Keep the comb light. A deep one is the first thing h.264 turns to mush, and a
+one-pixel line every three pixels is a moire pattern once the video is scaled
+down a feed — so `gap` comes down with the canvas like every other constant
+here, and the masks are built once rather than per frame, which is most of
+what the pass would otherwise cost.
+
 ## Notes: saying it beside the thing
 
 **Say it in the frame, not in a bar under it.** A caption bar across the foot
@@ -636,6 +704,63 @@ carry across a phone; a sentence at 30 does not. The room the fit reserves
 follows the font rather than being a constant, which it was until the font
 became a knob and the constant was quietly a second, disagreeing one.
 
+## Tags: words that name the beat rather than point at it
+
+A `note` points. It is anchored to the beat's rect and draws a leader back
+to it, which is exactly right when the words single out one row and wrong
+when they name the whole beat -- there the leader has nothing to single out,
+so it just crosses the picture, and the plate has to sit wherever the rect
+puts it.
+
+A `tag` names instead. It takes a fixed place in the frame, wraps to its own
+column, and draws no leader at all:
+
+```jsonc
+{"tag": {"text": "organize into folders", "at": "center-right",
+         "width": 0.40, "size": 58, "color": "after", "bg": true}}
+```
+
+`at` is `center|top|bottom` crossed with `left|right` (default
+`center-right`), `width` is the wrapping column as a share of the frame, and
+`size` overrides `render.note_size`. `color` and `bg` each take a theme key
+(`after`, `fg`, `bg`, …) or an explicit `[r, g, b]`; `bg: true` uses the
+theme's ground.
+
+Without a `bg` the words are stroked in the ground colour instead: enough to
+hold the letterforms apart from whatever is behind them, without drawing a
+box that reads as a second window. Over a screen that is *itself* text a
+stroke is not enough — the rows keep showing between the letters, which reads
+as two things in one place — so give it a fill.
+
+A tag may carry emoji anywhere in its text, not only at the front the way a
+note's does — `"too many sessions? 😰"`. They are composited rather than set,
+because Noto's colour emoji are bitmaps cut at exactly one size and cannot be
+a second font in a text run, and the wrap measures them as their drawn width:
+a line ending in one otherwise wraps as though the emoji were zero wide.
+
+A tag is placed against the **frame**, not against the camera's panel. The
+panel is whatever size the current scale makes it and is pasted at an offset,
+so a tag set flush to the panel's edge lands off-screen the moment the camera
+is zoomed in far enough for the panel to be wider than the frame.
+
+Unlike a note, a tag survives the travel between beats -- a beat's name
+should not blink off while the screen it names is arriving.
+
+## Wiping one beat onto the next
+
+`"transition": "wipe"` drags a hard edge across the frame instead of
+dissolving or pushing, with a bright leading bar in the beat's `tone`. It is
+the beat-level twin of [`swipe`](#swiping-one-screen-onto-another) and it is
+for the same reason: a dissolve between two screens of the same list reads as
+a smear, and a `push` slides the whole picture sideways, which says *another
+screen* when what happened is *this screen, changed*. It takes
+`timing.wipe`, falling back to `timing.push`.
+
+Two tags either side of a wipe do not cross-fade. Each is clipped to its own
+side of the moving edge, so the words are replaced in place exactly as the
+screen under them is -- which is what you want when both tags sit at the same
+spot, and that shared position is the point of them.
+
 ## Before and after in one clip
 
 Two things, and the second replaced the first: `"transition": "push"` on a beat
@@ -652,6 +777,75 @@ lands with the screen it describes. `tone` is a theme key (`before`, `after`,
 ...) and colours the band, the note's rule and the banner together. The
 establishing shot takes the first beat's, so a clip that opens on a BEFORE does
 not open in the after's green.
+
+## Meeting a schedule the program keeps
+
+A spec that photographs a program stepping through states of its own has two
+clocks in it, and a run of `sleep`s cannot hold them together. Every shot
+costs a grab and every key costs its settle; none of that is in the numbers
+the spec wrote down, so the sequence lands progressively late. Over
+twenty-five shots of the orchestrator dock that came to more than a whole
+step, and the last few shots all photographed the same finished screen --
+still all *distinct*, so nothing looked broken until the render.
+
+Two steps fix the drift:
+
+```jsonc
+{"mark": true},          // start the sequence clock here
+{"at": 12.13},           // be at 12.13s past the mark, however long the
+{"shot": "mv00"}         // steps in between actually took
+```
+
+`at` sleeps to a deadline rather than for a duration, so the lateness cannot
+accumulate; a step that misses its deadline by more than 150ms says so on
+stderr rather than quietly shifting everything after it.
+
+That is enough when the program's schedule is known. It is not enough when
+the *anchor* is a guess -- here, how long the keystroke that launches the
+program takes to become a running process. Measured at 1.2s every shot came
+back one step late; corrected to 2.3s the middle of the sequence lined up and
+the ends still did not, because the error was never a constant.
+
+**Where the program can be made to follow the camera instead, do that.**
+`shot` writes its raw dump into the shots directory at the instant it grabs
+and only encodes at the end of the take, so a new `.xwd` appearing there *is*
+the shutter, visible to any process that can watch the directory. A program
+that waits for one before making its next change cannot be photographed
+mid-step, and the spec's sleeps stop having to be aimed at anything -- they
+only have to be longer than one step's work. fresh's `fresh-dock-cleanup-focus`
+drives its agent this way; `scripts/clips/assets/fresh-dock-cleanup/bin/clip-agent`
+is the worked example.
+
+## Swiping one screen onto another
+
+Two screens that differ only in the *text of some rows* -- a rename, a
+retitle, a units change -- must not be dissolved into each other. Through the
+middle of a dissolve both strings are legible at once and the eye cannot tell
+which one is arriving; it reads as a blur, not as a change. A wipe with a hard
+edge can only ever show one of them per pixel:
+
+```jsonc
+{"shot": "before", "hold": 3.0,
+ "swipe": {"to": "after", "rows": [5, 6, 7, 8, 9, 11, 12],
+           "at": 0.35, "row": 0.20, "stagger": 0.10, "edge": 3}}
+```
+
+The beat is drawn on `shot`, and each row named in `rows` wipes across to the
+same row of `to`, left to right. `at` is when the first row starts, `row` is
+how long one row takes, `stagger` is the gap between one row and the next --
+all in **seconds off the beat's `hold`**, not shares of it, so a cascade keeps
+its cadence when the beat is retimed. `edge` is the width in pixels of the
+leading bar drawn at the wipe front (`edge_color` overrides the theme's
+`after`); `0` turns it off.
+
+Rows are wiped in the order given, not in the order they sit on screen, and a
+row not named is never touched -- which is what keeps a folder header from
+flickering under a cascade running past it. The two screens have to be the
+same capture geometry, which for two `shot`s of one take they always are.
+
+The stagger is the part that matters. All the rows wiping at once reads as one
+repaint; a tenth of a second between them reads as a sequence of separate
+edits, which is usually what actually happened.
 
 ## Shots: more than one screen in one clip
 
