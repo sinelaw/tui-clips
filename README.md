@@ -632,9 +632,17 @@ as it collapses rather than dimmer. Fading the picture to black instead is
 what a power-off looks like to someone who has only ever read a description
 of one.
 
+`off_glow` scales the bloom on the dying raster, which is the brightest thing
+in the clip by a long way and so gets its own number rather than riding the
+`bloom` used for ordinary phosphor. It is thrown at two radii: a tight halo
+for the shape and a wide one for the wash on the glass. One blur wide enough
+to give the wash loses the hard edge of the line; one tight enough to keep
+the edge does not spill at all.
+
 It takes the end of the clip rather than adding to it, so whatever is left of
 the last beat in front of it is the final hold — lengthen that beat if you
-want longer on the finished screen.
+want longer on the finished screen, and remember that shortening `shutdown`
+moves the collapse *later*, not the ending sooner.
 
 Keep the comb light. A deep one is the first thing h.264 turns to mush, and a
 one-pixel line every three pixels is a moire pattern once the video is scaled

@@ -198,6 +198,10 @@ class CRT:
         # Seconds of power-off at the end of the clip. 0 to hold instead.
         self.shutdown = float(cfg.get("shutdown", 0.0))
         self.off_color = tuple(cfg.get("off_color", (223, 255, 233)))
+        # How hard the dying raster blooms. It is the brightest thing in the
+        # clip by a long way, so it gets its own number rather than riding
+        # the `bloom` used for ordinary phosphor.
+        self.off_glow = float(cfg.get("off_glow", 1.35))
         self.kk = k
         self.w, self.h = w, h
         self._scan = None
@@ -283,26 +287,36 @@ class CRT:
         out = Image.new("RGB", (w, h), (0, 0, 0))
         lh = max(2, int(round(3 * self.kk)))
         cx, cy = w // 2, h // 2
-        if q < 0.50:                                  # the raster squeezes
-            t = q / 0.50
-            hh = max(lh, int(h * (1.0 - t) ** 1.7))
+        if q < 0.42:                                  # the raster squeezes
+            t = q / 0.42
+            hh = max(lh, int(h * (1.0 - t) ** 2.3))
             band = im.resize((w, hh), Image.BILINEAR)
-            band = band.point(lambda v: min(255, int(v * (1.0 + 2.2 * t))))
+            band = band.point(lambda v: min(255, int(v * (1.0 + 3.0 * t))))
             out.paste(band, (0, (h - hh) // 2))
-        elif q < 0.80:                                # the line shortens
-            t = (q - 0.50) / 0.30
+        elif q < 0.76:                                # the line shortens
+            t = (q - 0.42) / 0.34
             ww = max(2, int(w * (1.0 - t) ** 1.4))
             ImageDraw.Draw(out).rectangle(
                 [cx - ww // 2, cy - lh // 2, cx + ww // 2, cy + lh // 2],
                 fill=self.off_color)
         else:                                         # the dot decays
-            t = (q - 0.80) / 0.20
+            t = (q - 0.76) / 0.24
             r = max(1, int(lh * 1.7 * (1.0 - t)))
             c = tuple(int(v * (1.0 - t) ** 1.5) for v in self.off_color)
             ImageDraw.Draw(out).ellipse([cx - r, cy - r, cx + r, cy + r],
                                         fill=c)
-        glow = out.filter(ImageFilter.GaussianBlur(self.blur * 1.6))
-        return ImageChops.screen(out, glow.point(lambda v: int(v * 0.85)))
+        # Two radii, not one: a tight halo for the shape and a wide one for
+        # the wash it throws on the glass. A single blur wide enough to give
+        # the wash loses the hard edge of the line, and one tight enough to
+        # keep the edge does not spill at all.
+        r = self.blur * 2.0
+        tight = out.filter(ImageFilter.GaussianBlur(r))
+        wide = out.filter(ImageFilter.GaussianBlur(r * 3.2))
+        glow = ImageChops.add(tight.point(lambda v: int(v * 0.95)),
+                              wide.point(lambda v: int(v * 0.75)))
+        if self.off_glow != 1.0:
+            glow = glow.point(lambda v: min(255, int(v * self.off_glow)))
+        return ImageChops.screen(out, glow)
 
     def __call__(self, im: Image.Image, q=None) -> Image.Image:
         im = im.convert("RGB")
