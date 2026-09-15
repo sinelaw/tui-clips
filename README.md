@@ -653,6 +653,44 @@ lands with the screen it describes. `tone` is a theme key (`before`, `after`,
 establishing shot takes the first beat's, so a clip that opens on a BEFORE does
 not open in the after's green.
 
+## Meeting a schedule the program keeps
+
+A spec that photographs a program stepping through states of its own has two
+clocks in it, and a run of `sleep`s cannot hold them together. Every shot
+costs a grab and every key costs its settle; none of that is in the numbers
+the spec wrote down, so the sequence lands progressively late. Over
+twenty-five shots of the orchestrator dock that came to more than a whole
+step, and the last few shots all photographed the same finished screen --
+still all *distinct*, so nothing looked broken until the render.
+
+Two steps fix the drift:
+
+```jsonc
+{"mark": true},          // start the sequence clock here
+{"at": 12.13},           // be at 12.13s past the mark, however long the
+{"shot": "mv00"}         // steps in between actually took
+```
+
+`at` sleeps to a deadline rather than for a duration, so the lateness cannot
+accumulate; a step that misses its deadline by more than 150ms says so on
+stderr rather than quietly shifting everything after it.
+
+That is enough when the program's schedule is known. It is not enough when
+the *anchor* is a guess -- here, how long the keystroke that launches the
+program takes to become a running process. Measured at 1.2s every shot came
+back one step late; corrected to 2.3s the middle of the sequence lined up and
+the ends still did not, because the error was never a constant.
+
+**Where the program can be made to follow the camera instead, do that.**
+`shot` writes its raw dump into the shots directory at the instant it grabs
+and only encodes at the end of the take, so a new `.xwd` appearing there *is*
+the shutter, visible to any process that can watch the directory. A program
+that waits for one before making its next change cannot be photographed
+mid-step, and the spec's sleeps stop having to be aimed at anything -- they
+only have to be longer than one step's work. fresh's `fresh-dock-cleanup-focus`
+drives its agent this way; `scripts/clips/assets/fresh-dock-cleanup/bin/clip-agent`
+is the worked example.
+
 ## Swiping one screen onto another
 
 Two screens that differ only in the *text of some rows* -- a rename, a

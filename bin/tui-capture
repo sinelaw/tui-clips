@@ -112,9 +112,10 @@ def main() -> None:
                        ("--sleep", "sleep"), ("--shot", "shot"),
                        ("--record", "record"), ("--drag", "drag"),
                        ("--click", "click"), ("--move", "move"),
+                       ("--mark", "mark"), ("--at", "at"),
                        ("--park", "park")]:
         ap.add_argument(flag, dest=dest, action=Step,
-                        nargs=0 if dest == "park" else None)
+                        nargs=0 if dest in ("park", "mark") else None)
 
     args, rest = ap.parse_known_args()
     actions = getattr(args, "actions", None) or []
@@ -152,6 +153,12 @@ def main() -> None:
         s.start_x()
         s.launch(rest)
         s.begin_grabbing(drain)
+        start = time.monotonic()
+        origin = None
+        # A step that lands this far past its deadline is worth saying out
+        # loud: the sequence is no longer keeping the schedule it was written
+        # against, and the shots after it are aimed at the wrong screens.
+        drift_warn = 0.15
         for kind, value in actions:
             if kind == "key":
                 if value.strip().startswith("{"):
@@ -168,6 +175,29 @@ def main() -> None:
                     s.type(value)
             elif kind == "sleep":
                 time.sleep(float(value))
+            elif kind == "mark":
+                # Start (or restart) the sequence clock that `at` counts from.
+                origin = time.monotonic()
+            elif kind == "at":
+                # Be at T seconds past the mark, however long the steps in
+                # between actually took.
+                #
+                # A run of `sleep`s drifts: every shot costs a grab, every key
+                # costs its settle, and none of that is in the number the spec
+                # wrote down. Over twenty-five shots it added up to more than a
+                # whole step here, and the last few shots all photographed the
+                # same final screen -- the states they were aimed at had
+                # already been and gone. Sleeping to a deadline cannot drift,
+                # so a spec driving a program that keeps its own schedule can
+                # actually meet it.
+                if origin is None:
+                    origin = start
+                late = time.monotonic() - (origin + float(value))
+                if late < 0:
+                    time.sleep(-late)
+                elif late > drift_warn:
+                    print(f"tui-capture:   at {float(value):.2f}s ran "
+                          f"{late:.2f}s late", file=sys.stderr)
             elif kind == "shot":
                 s.shot(value)
             elif kind == "record":

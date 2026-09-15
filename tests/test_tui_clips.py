@@ -668,6 +668,70 @@ def test_swipe_staggers_the_rows_it_is_given(tmp):
     check(im2.getpixel((10, y6)) == blue, "the second row follows it")
 
 
+def test_at_holds_a_deadline_that_sleeps_would_drift_off(tmp):
+    """`at` is absolute; a run of `sleep`s is not.
+
+    The cost of the steps between two sleeps -- a grab per shot, a settle per
+    key -- is not in the numbers a spec writes down, so a long sequence of
+    sleeps lands progressively late. Over twenty-five shots of the dock clip
+    that was more than a whole step, and the last few shots photographed a
+    screen whose state had already moved on.
+    """
+    import time as _t
+
+    def elapsed(steps, work=0.04):
+        """walk steps the way tui-capture does, charging `work` per action"""
+        t0 = _t.monotonic()
+        origin = None
+        for kind, value in steps:
+            if kind == "sleep":
+                _t.sleep(float(value))
+            elif kind == "mark":
+                origin = _t.monotonic()
+            elif kind == "at":
+                if origin is None:
+                    origin = t0
+                late = _t.monotonic() - (origin + float(value))
+                if late < 0:
+                    _t.sleep(-late)
+            else:
+                _t.sleep(work)          # a shot costs a grab
+        return _t.monotonic() - (origin if origin is not None else t0)
+
+    n, gap = 6, 0.05
+    by_sleep = [("mark", None)]
+    for _ in range(n):
+        by_sleep += [("sleep", gap), ("shot", "x")]
+    by_at = [("mark", None)]
+    for i in range(n):
+        by_at += [("at", round((i + 1) * gap, 3)), ("shot", "x")]
+
+    want = n * gap
+    drifted = elapsed(by_sleep) - want
+    held = elapsed(by_at) - want
+    check(drifted > 0.15,
+          f"summed sleeps drift late ({drifted:+.3f}s over {n} shots)")
+    check(abs(held) < 0.05,
+          f"`at` holds the deadline ({held:+.3f}s over the same {n})")
+    check(held < drifted, "and it is the better of the two")
+
+
+def test_mark_and_at_reach_tui_capture(tmp):
+    """the two new steps survive the spec -> tui-capture translation"""
+    # bin/tui-clip has no .py suffix, so it needs the loader naming the
+    # source type outright; spec_from_file_location alone returns no loader.
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    path = os.path.join(ROOT, "bin", "tui-clip")
+    sp = importlib.util.spec_from_loader("tui_clip", SourceFileLoader("tui_clip", path))
+    mod = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(mod)
+    check(mod.step_argv({"mark": True}, "solo", tmp, {}) == ["--mark"],
+          "a mark step becomes --mark")
+    check(mod.step_argv({"at": 12.5}, "solo", tmp, {}) == ["--at", "12.5"],
+          "an at step becomes --at")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
