@@ -636,6 +636,46 @@ carry across a phone; a sentence at 30 does not. The room the fit reserves
 follows the font rather than being a constant, which it was until the font
 became a knob and the constant was quietly a second, disagreeing one.
 
+## Tags: words that name the beat rather than point at it
+
+A `note` points. It is anchored to the beat's rect and draws a leader back
+to it, which is exactly right when the words single out one row and wrong
+when they name the whole beat -- there the leader has nothing to single out,
+so it just crosses the picture, and the plate has to sit wherever the rect
+puts it.
+
+A `tag` names instead. It takes a fixed place in the frame, wraps to its own
+column, and draws no leader at all:
+
+```jsonc
+{"tag": {"text": "organize into folders", "at": "center-right",
+         "width": 0.34, "size": 58}}
+```
+
+`at` is `center|top|bottom` crossed with `left|right` (default
+`center-right`), `width` is the wrapping column as a share of the frame, and
+`size` overrides `render.note_size`. The words are stroked in the ground
+colour rather than set on a plate: enough to hold the letterforms apart from
+whatever is behind them, without drawing a box that reads as a second window.
+
+Unlike a note, a tag survives the travel between beats -- a beat's name
+should not blink off while the screen it names is arriving.
+
+## Wiping one beat onto the next
+
+`"transition": "wipe"` drags a hard edge across the frame instead of
+dissolving or pushing, with a bright leading bar in the beat's `tone`. It is
+the beat-level twin of [`swipe`](#swiping-one-screen-onto-another) and it is
+for the same reason: a dissolve between two screens of the same list reads as
+a smear, and a `push` slides the whole picture sideways, which says *another
+screen* when what happened is *this screen, changed*. It takes
+`timing.wipe`, falling back to `timing.push`.
+
+Two tags either side of a wipe do not cross-fade. Each is clipped to its own
+side of the moving edge, so the words are replaced in place exactly as the
+screen under them is -- which is what you want when both tags sit at the same
+spot, and that shared position is the point of them.
+
 ## Before and after in one clip
 
 Two things, and the second replaced the first: `"transition": "push"` on a beat

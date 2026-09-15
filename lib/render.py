@@ -376,11 +376,17 @@ class Renderer:
     def gap(self, i: int) -> float:
         """the travel out of beat i.
 
-        A push moves a whole screen the width of the frame, which wants longer
-        than the cross-fade a pan is, so it takes its own timing.
+        A push moves a whole screen the width of the frame, and a wipe drags
+        an edge across it; both want longer than the cross-fade a pan is, so
+        both take their own timing. `wipe` falls back to `push`'s, which is
+        the right order of magnitude for the same reason.
         """
-        if i + 1 < len(self.ann) and self.ann[i + 1].get("transition") == "push":
-            return float(self.t["push"])
+        if i + 1 < len(self.ann):
+            t = self.ann[i + 1].get("transition")
+            if t == "push":
+                return float(self.t["push"])
+            if t == "wipe":
+                return float(self.t.get("wipe", self.t["push"]))
         return float(self.t["pan"])
 
     def total(self) -> float:
@@ -704,6 +710,74 @@ class Renderer:
         if head and rest and not head.isascii():
             return head, rest
         return None, note
+
+
+    # A tag is the other way to put words on a picture. A note points: it is
+    # anchored to a rect and carries a leader back to it, which is right when
+    # the words are about one row and wrong when they name the whole beat --
+    # there the leader has nothing to single out, and crossing the picture to
+    # reach an arbitrary rect is just a line drawn over the content. A tag
+    # names the beat instead: it sits at a fixed place in the frame, wraps to
+    # its own column, and draws no leader at all.
+    TAG_PAD = 26
+    TAG_GAP = 1.18          # line spacing, in multiples of the line height
+
+    def wrap_tag(self, text: str, font, max_w: int) -> list[str]:
+        """greedy wrap; a single word longer than the column keeps its line"""
+        lines, cur = [], ""
+        for word in str(text).split():
+            trial = f"{cur} {word}".strip()
+            if cur and font.getlength(trial) > max_w:
+                lines.append(cur); cur = word
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def tag(self, ov, i: int, alpha: int, size) -> None:
+        """beat i's tag, set against an edge of the frame"""
+        a = self.ann[i]
+        t = a.get("tag")
+        if not t or alpha <= 4:
+            return
+        t = {"text": t} if isinstance(t, str) else dict(t)
+        text = t.get("text", "")
+        if not text:
+            return
+        at = str(t.get("at", "center-right"))
+        font = (self.f_note if not t.get("size") else
+                ImageFont.truetype(BOLD, self.k(int(t["size"]))))
+        cw, ch = size
+        pad = self.k(self.TAG_PAD)
+        # The column is a share of the frame, so the same tag wraps the same
+        # way whatever the canvas is -- a draft is a faithful miniature.
+        col = int(cw * float(t.get("width", 0.42)))
+        lines = self.wrap_tag(text, font, col)
+        asc, desc = font.getmetrics()
+        lh = asc + desc
+        step = int(lh * self.TAG_GAP)
+        block_h = step * (len(lines) - 1) + lh
+        right = not at.endswith("left")
+        if "top" in at:
+            y = pad
+        elif "bottom" in at:
+            y = ch - pad - block_h
+        else:
+            y = int((ch - block_h) / 2)
+        ld = ImageDraw.Draw(ov)
+        fill = fade_c(self.th.get("fg", (255, 255, 255)), alpha)
+        # A tag lies over the picture with no plate under it, so it is stroked
+        # in the ground colour instead: enough to hold the letterforms apart
+        # from whatever is behind them, without drawing a box that reads as a
+        # second window.
+        stroke = fade_c(self.th["bg"], alpha)
+        sw = self.k(4)
+        for n, line in enumerate(lines):
+            w = font.getlength(line)
+            x = (cw - pad - w) if right else pad
+            ld.text((x, y + n * step), line, font=font, fill=fill,
+                    stroke_width=sw, stroke_fill=stroke)
 
     def callout(self, nov, i: int, b, alpha: int, tone, size):
         ld = ImageDraw.Draw(nov)
@@ -1174,12 +1248,40 @@ class Renderer:
         # also travelling reads as a stumble, and the point of the shape is
         # that one thing *replaced* another, not that one became it.
         push = pan > 0 and self.ann[nxt].get("transition") == "push"
+        # A wipe replaces the screen with a hard edge travelling across it,
+        # the same language the row-level `swipe` uses: one screen per pixel,
+        # never a blend of both. A dissolve between two screens of the same
+        # list reads as a smear, and a push slides the whole picture sideways
+        # -- which says "another screen" when what happened is "this screen,
+        # changed".
+        wipe = pan > 0 and self.ann[nxt].get("transition") == "wipe"
         if push:
             for k, hpk, off in ((ai, 1.0, -pan * cwi), (nxt, 0.0, (1 - pan) * cwi)):
                 sk, sxk, syk = self.cam(k)
                 lay.paste(self.screen(k, hpk, sk),
                           (int(round(cwi / 2 - sxk * sk + off)),
                            int(round(chi / 2 - syk * sk))))
+        elif wipe:
+            for k, hpk in ((ai, 1.0), (nxt, 0.0)):
+                sk, sxk, syk = self.cam(k)
+                at = (int(round(cwi / 2 - sxk * sk)),
+                      int(round(chi / 2 - syk * sk)))
+                img = self.screen(k, hpk, sk)
+                if k == ai:
+                    lay.paste(img, at)
+                    continue
+                edge_x = int(round(cwi * pan))
+                inc = Image.new("RGB", (cwi, chi),
+                                self.chrome.fill if self.chrome else th["bg"])
+                inc.paste(img, at)
+                mask = Image.new("L", (cwi, chi), 0)
+                ImageDraw.Draw(mask).rectangle([0, 0, edge_x, chi - 1], fill=255)
+                lay.paste(inc, (0, 0), mask)
+                ew = self.k(4)
+                if 0 < edge_x < cwi:
+                    ImageDraw.Draw(lay).rectangle(
+                        [max(0, edge_x - ew), 0, edge_x, chi - 1],
+                        fill=tuple(self.th[self.ann[nxt].get("tone", "after")]))
         else:
             base = self.screen(ai, 1.0 if pan > 0 else hp, s)
             if pan > 0:
@@ -1191,7 +1293,7 @@ class Renderer:
         # The pointer goes on the screen, under the annotation layer: it is
         # part of what was filmed, so the dim that falls on the screen falls
         # on it too.
-        if self.cursor_cfg is not None and not push:
+        if self.cursor_cfg is not None and not push and not wipe:
             cov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
             drew = False
             for k, alpha in ((ai, int(255 * (1.0 - pan))), (nxt, int(255 * pan))):
@@ -1220,7 +1322,7 @@ class Renderer:
         # turned the band off to let pure motion speak lost its note with it,
         # and the words had to go on the beats either side -- describing the
         # movement before and after the frames that showed it.
-        vis = 0.0 if push else (min(1.0, max(0.0, (p - 0.55) / 0.45))
+        vis = 0.0 if (push or wipe) else (min(1.0, max(0.0, (p - 0.55) / 0.45))
                                 * (1.0 - rel))
         tone_i = self.th[self.ann[ai].get("tone", "after")]
         tone_j = self.th[self.ann[nxt].get("tone", "after")]
@@ -1250,13 +1352,35 @@ class Renderer:
         # incoming one rather than overwrite it. The pass runs whether or not
         # the band was drawn -- the note is anchored to the beat's rect, which
         # exists either way.
-        if vis > 0.015:
+        tvis = min(1.0, max(0.0, (p - 0.55) / 0.45)) * (1.0 - rel)
+        if vis > 0.015 or tvis > 0.015:
             nov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-            self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
-                         lay.size)
-            if pan > 0:
-                self.callout(nov, nxt, b_next, int(255 * vis * pan), tone_j,
+            if vis > 0.015:
+                self.callout(nov, ai, b, int(255 * vis * (1.0 - pan)), tone_i,
                              lay.size)
+                if pan > 0:
+                    self.callout(nov, nxt, b_next, int(255 * vis * pan), tone_j,
+                                 lay.size)
+            # A tag names the beat, so it has to survive the travel rather
+            # than blink off with the band. Across a *wipe* it rides the edge:
+            # both tags are drawn at full strength and each is clipped to its
+            # own side of the moving line, so the words are replaced in place
+            # exactly as the screen under them is. Cross-fading them instead
+            # would put one word on top of the other -- they share a position,
+            # which is the whole point of them sharing a position.
+            if wipe:
+                ex = int(round(lay.size[0] * pan))
+                for k, box in ((ai, (ex, 0, lay.size[0], lay.size[1])),
+                               (nxt, (0, 0, ex, lay.size[1]))):
+                    if box[2] <= box[0]:
+                        continue
+                    one = Image.new("RGBA", lay.size, (0, 0, 0, 0))
+                    self.tag(one, k, int(255 * tvis), lay.size)
+                    nov.alpha_composite(one.crop(box), (box[0], box[1]))
+            else:
+                self.tag(nov, ai, int(255 * tvis * (1.0 - pan)), lay.size)
+                if pan > 0:
+                    self.tag(nov, nxt, int(255 * tvis * pan), lay.size)
             lay = lay.convert("RGBA")
             lay.alpha_composite(nov)
             lay = lay.convert("RGB")
