@@ -971,15 +971,30 @@ class Renderer:
             return tuple(int(c) for c in v[:3])
         return tuple(default)
 
-    def wrap_tag(self, text: str, font, max_w: int) -> list[str]:
-        """greedy wrap; a single word longer than the column keeps its line"""
-        lines, cur = [], ""
+    def wrap_tag(self, text: str, font, max_w: int, eh: int = 0) -> list[list]:
+        """greedy wrap into lines of tokens.
+
+        A token is either a word or an emoji, because a colour emoji cannot
+        be part of a text run -- Noto's are bitmaps cut at one size, so they
+        are drawn separately and pasted. Measuring has to know that too, or a
+        line ending in one wraps as though the emoji were zero wide.
+
+        -> [[(kind, text, width), ...], ...] with kind in {"t", "e"}.
+        A single token wider than the column keeps its own line.
+        """
+        sp = font.getlength(" ")
+        lines, cur, w = [], [], 0.0
         for word in str(text).split():
-            trial = f"{cur} {word}".strip()
-            if cur and font.getlength(trial) > max_w:
-                lines.append(cur); cur = word
+            if eh and word and not word.isascii():
+                img = self.emoji(word, eh)
+                tok = ("e", word, float(img.width) if img else 0.0)
             else:
-                cur = trial
+                tok = ("t", word, float(font.getlength(word)))
+            adv = tok[2] + (sp if cur else 0)
+            if cur and w + adv > max_w:
+                lines.append(cur); cur, w = [tok], tok[2]
+            else:
+                cur.append(tok); w += adv
         if cur:
             lines.append(cur)
         return lines
@@ -1002,11 +1017,16 @@ class Renderer:
         # The column is a share of the frame, so the same tag wraps the same
         # way whatever the canvas is -- a draft is a faithful miniature.
         col = int(cw * float(t.get("width", 0.42)))
-        lines = self.wrap_tag(text, font, col)
         asc, desc = font.getmetrics()
         lh = asc + desc
+        eh = int(asc * 0.96)
+        lines = self.wrap_tag(text, font, col, eh)
         step = int(lh * self.TAG_GAP)
         block_h = step * (len(lines) - 1) + lh
+        sp = font.getlength(" ")
+
+        def line_w(toks):
+            return sum(k[2] for k in toks) + sp * max(0, len(toks) - 1)
         right = not at.endswith("left")
         if "top" in at:
             y = pad
@@ -1016,7 +1036,7 @@ class Renderer:
             y = int((ch - block_h) / 2)
         ld = ImageDraw.Draw(ov)
         fill = fade_c(self.tone_of(t.get("color"), self.th.get("fg")), alpha)
-        widest = max((font.getlength(l) for l in lines), default=0)
+        widest = max((line_w(l) for l in lines), default=0)
         x0 = (cw - pad - widest) if right else pad
 
         # `bg` gives the words something to sit on. Over a screen that is
@@ -1037,11 +1057,25 @@ class Renderer:
         # box that reads as a second window.
         sw = 0 if bg else self.k(4)
         stroke = fade_c(self.th["bg"], alpha)
-        for n, line in enumerate(lines):
-            w = font.getlength(line)
-            x = (cw - pad - w) if right else pad
-            ld.text((x, y + n * step), line, font=font, fill=fill,
-                    stroke_width=sw, stroke_fill=stroke)
+        for n, toks in enumerate(lines):
+            x = (cw - pad - line_w(toks)) if right else pad
+            ly = y + n * step
+            for kind, word, tw in toks:
+                if kind == "e":
+                    img = self.emoji(word, eh)
+                    if img is not None:
+                        # Baseline-ish: sat on the text's ascent rather than
+                        # its box, or it floats above a line of lower-case.
+                        cell = img.copy()
+                        if alpha < 255:
+                            a = cell.getchannel("A").point(
+                                lambda v: int(v * alpha / 255))
+                            cell.putalpha(a)
+                        ov.alpha_composite(cell, (int(x), int(ly + asc - eh)))
+                else:
+                    ld.text((x, ly), word, font=font, fill=fill,
+                            stroke_width=sw, stroke_fill=stroke)
+                x += tw + sp
 
     def callout(self, nov, i: int, b, alpha: int, tone, size):
         ld = ImageDraw.Draw(nov)

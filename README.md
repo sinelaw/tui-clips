@@ -732,6 +732,12 @@ box that reads as a second window. Over a screen that is *itself* text a
 stroke is not enough — the rows keep showing between the letters, which reads
 as two things in one place — so give it a fill.
 
+A tag may carry emoji anywhere in its text, not only at the front the way a
+note's does — `"too many sessions? 😰"`. They are composited rather than set,
+because Noto's colour emoji are bitmaps cut at exactly one size and cannot be
+a second font in a text run, and the wrap measures them as their drawn width:
+a line ending in one otherwise wraps as though the emoji were zero wide.
+
 A tag is placed against the **frame**, not against the camera's panel. The
 panel is whatever size the current scale makes it and is pasted at an offset,
 so a tag set flush to the panel's edge lands off-screen the moment the camera
