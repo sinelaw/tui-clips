@@ -639,6 +639,14 @@ for the shape and a wide one for the wash on the glass. One blur wide enough
 to give the wash loses the hard edge of the line; one tight enough to keep
 the edge does not spill at all.
 
+The dot at the end is drawn with an explicit halo rather than a blurred one,
+and the reason generalises. **A Gaussian conserves energy**, so blurring a
+five-pixel dot over a fifty-pixel radius returns something arithmetically
+correct and visually black. The squeezed raster and the line are large enough
+sources to survive that treatment; the dot is not, and it is the frame
+everybody remembers about a CRT going off. Anywhere else a small bright thing
+needs to glow, blur is the wrong instrument — composite a sprite.
+
 It takes the end of the clip rather than adding to it, so whatever is left of
 the last beat in front of it is the final hold — lengthen that beat if you
 want longer on the finished screen, and remember that shortening `shutdown`

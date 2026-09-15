@@ -207,6 +207,7 @@ class CRT:
         self._scan = None
         self._vig = None
         self._mesh = None
+        self._halo = {}
 
     def scan_mask(self):
         """one dark row every `gap`, tiled -- built once, reused every frame"""
@@ -236,6 +237,23 @@ class CRT:
                 self._vig = g.point(
                     lambda v: int(255 - self.vig * v))
         return self._vig
+
+    def halo(self, d: int):
+        """a radial glow sprite `d` across, cached by size.
+
+        The dot at the end needs its own, because a blur cannot give it one.
+        A Gaussian conserves energy: spread five bright pixels over a radius
+        of fifty and what comes back is arithmetically correct and visually
+        nothing. The line and the squeezed raster are large enough sources to
+        survive that; the dot is not, and it is the one frame everybody
+        remembers about a CRT going off.
+        """
+        if d not in self._halo:
+            g = Image.radial_gradient("L").resize((d, d), Image.BILINEAR)
+            # 0 at the centre, 255 at the edge -- inverted, and squared up so
+            # the falloff is a glow rather than a flat disc
+            self._halo[d] = g.point(lambda v: max(0, 255 - int(v * 1.9)))
+        return self._halo[d]
 
     def mesh(self):
         """the barrel warp, as a grid of quads -- built once per canvas.
@@ -301,8 +319,17 @@ class CRT:
                 fill=self.off_color)
         else:                                         # the dot decays
             t = (q - 0.76) / 0.24
+            fade = (1.0 - t) ** 1.5
             r = max(1, int(lh * 1.7 * (1.0 - t)))
-            c = tuple(int(v * (1.0 - t) ** 1.5) for v in self.off_color)
+            c = tuple(int(v * fade) for v in self.off_color)
+            # the halo first, so the dot itself sits on top of it
+            hd = max(8, int((lh * 26 * (1.0 - t) + 10) * self.kk)) | 1
+            sprite = Image.new("RGB", (hd, hd),
+                               tuple(int(v * fade * 0.85)
+                                     for v in self.off_color))
+            glow = Image.new("RGB", (w, h), (0, 0, 0))
+            glow.paste(sprite, (cx - hd // 2, cy - hd // 2), self.halo(hd))
+            out = ImageChops.screen(out, glow)
             ImageDraw.Draw(out).ellipse([cx - r, cy - r, cx + r, cy + r],
                                         fill=c)
         # Two radii, not one: a tight halo for the shape and a wide one for
