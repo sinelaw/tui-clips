@@ -187,15 +187,18 @@ class CRT:
 
     def __init__(self, cfg, w: int, h: int, k: float = 1.0):
         cfg = {} if cfg is True else dict(cfg or {})
-        self.scan = float(cfg.get("scanlines", 0.16))
-        self.gap = max(2, int(round(float(cfg.get("gap", 3)) * k)))
-        self.bloom = float(cfg.get("bloom", 0.30))
-        self.blur = max(1.0, float(cfg.get("blur", 7)) * k)
-        self.shift = int(round(float(cfg.get("shift", 2)) * k))
-        self.vig = float(cfg.get("vignette", 0.22))
+        self.scan = float(cfg.get("scanlines", 0.34))
+        self.gap = max(2, int(round(float(cfg.get("gap", 4)) * k)))
+        self.bloom = float(cfg.get("bloom", 0.55))
+        self.blur = max(1.0, float(cfg.get("blur", 9)) * k)
+        self.shift = int(round(float(cfg.get("shift", 3)) * k))
+        self.vig = float(cfg.get("vignette", 0.45))
+        self.curve = float(cfg.get("curve", 0.10))
+        self.cells = int(cfg.get("cells", 24))
         self.w, self.h = w, h
         self._scan = None
         self._vig = None
+        self._mesh = None
 
     def scan_mask(self):
         """one dark row every `gap`, tiled -- built once, reused every frame"""
@@ -226,6 +229,36 @@ class CRT:
                     lambda v: int(255 - self.vig * v))
         return self._vig
 
+    def mesh(self):
+        """the barrel warp, as a grid of quads -- built once per canvas.
+
+        The curve is the trait that actually says "tube". Scanlines and a
+        vignette on a flat rectangle read as a filter laid over a screenshot;
+        bending the raster is what makes it a thing with glass in front of it.
+
+        Each destination cell samples from a source quad pushed outward by
+        `1 + curve*r²`, so the middle is near enough untouched and the corners
+        reach past the edge of the image and come back black -- which is the
+        rounded-off corner of the tube, for free.
+        """
+        if self._mesh is None:
+            k, w, h, n = self.curve, self.w, self.h, self.cells
+            quads = []
+            for gy in range(n):
+                for gx in range(n):
+                    x0, x1 = w * gx / n, w * (gx + 1) / n
+                    y0, y1 = h * gy / n, h * (gy + 1) / n
+                    src = []
+                    # MESH wants the source quad as nw, sw, se, ne
+                    for px, py in ((x0, y0), (x0, y1), (x1, y1), (x1, y0)):
+                        u, v = (px / w) * 2 - 1, (py / h) * 2 - 1
+                        f = 1.0 + k * (u * u + v * v)
+                        src += [(u * f + 1) / 2 * w, (v * f + 1) / 2 * h]
+                    quads.append(((int(round(x0)), int(round(y0)),
+                                   int(round(x1)), int(round(y1))), tuple(src)))
+            self._mesh = quads
+        return self._mesh
+
     def __call__(self, im: Image.Image) -> Image.Image:
         im = im.convert("RGB")
         if self.shift:
@@ -242,6 +275,11 @@ class CRT:
         if self.scan > 0:
             im = ImageChops.multiply(im, Image.merge(
                 "RGB", (self.scan_mask(),) * 3))
+        # Curve last of the geometry, so the scanlines bend with the raster
+        # rather than staying flat behind a warped picture.
+        if self.curve > 0:
+            im = im.transform((self.w, self.h), Image.MESH, self.mesh(),
+                              Image.BILINEAR, fillcolor=(0, 0, 0))
         if self.vig > 0:
             im = ImageChops.multiply(im, Image.merge(
                 "RGB", (self.vig_mask(),) * 3))

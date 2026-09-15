@@ -596,17 +596,26 @@ panel keeps the crisp border it is drawn with. `VIG_X`, `VIG_Y` and
 on the way to disk:
 
 ```jsonc
-"crt": {"scanlines": 0.14, "gap": 3, "bloom": 0.28, "shift": 2,
-        "vignette": 0.26}
+"crt": {"scanlines": 0.34, "gap": 4, "bloom": 0.55, "shift": 3,
+        "vignette": 0.45, "curve": 0.11}
 ```
 
-Four things, in the order a real one does them. Two of them read as a CRT and
-two are what stop it looking like a filter: `shift` pulls the red and blue
-channels apart by a pixel or two (the convergence error of a three-gun tube),
-`bloom` bleeds the bright parts into their neighbours (phosphor glows, it does
-not stop at the pixel), `scanlines` darkens every `gap`-th row, and `vignette`
-takes the corners down because the screen is curved even when the image is
-not. `"crt": true` takes the defaults.
+`"crt": true` takes the defaults, which are those. Five things, in the order
+a real one does them:
+
+| key | what it is |
+|---|---|
+| `shift` | red and blue pulled apart, the convergence error of a three-gun tube |
+| `bloom` | the bright parts bled into their neighbours — phosphor glows, it does not stop at the pixel |
+| `scanlines` | every `gap`-th row darkened |
+| `curve` | the raster bent, corners reaching past the edge and coming back black |
+| `vignette` | the corners taken down |
+
+**`curve` is the one that does the work.** Scanlines and a vignette on a flat
+rectangle read as a filter laid over a screenshot; bending the raster is what
+makes it a thing with glass in front of it, and it brings the rounded-off
+corner of the tube with it for free. The first version of this pass had
+everything but the curve and was politely described as not visible.
 
 Keep the comb light. A deep one is the first thing h.264 turns to mush, and a
 one-pixel line every three pixels is a moire pattern once the video is scaled
