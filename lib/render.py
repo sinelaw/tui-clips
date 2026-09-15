@@ -195,6 +195,10 @@ class CRT:
         self.vig = float(cfg.get("vignette", 0.45))
         self.curve = float(cfg.get("curve", 0.10))
         self.cells = int(cfg.get("cells", 24))
+        # Seconds of power-off at the end of the clip. 0 to hold instead.
+        self.shutdown = float(cfg.get("shutdown", 0.0))
+        self.off_color = tuple(cfg.get("off_color", (223, 255, 233)))
+        self.kk = k
         self.w, self.h = w, h
         self._scan = None
         self._vig = None
@@ -259,7 +263,48 @@ class CRT:
             self._mesh = quads
         return self._mesh
 
-    def __call__(self, im: Image.Image) -> Image.Image:
+    def power_off(self, im: Image.Image, q: float) -> Image.Image:
+        """the tube losing its deflection, over `q` in 0..1.
+
+        A CRT does not fade out, it collapses. The vertical deflection gives
+        up first and the whole raster is squeezed into one over-bright
+        horizontal line -- the same beam energy over a fraction of the
+        height, which is why it gets brighter as it gets thinner rather than
+        dimmer. Then the horizontal deflection goes and the line shortens to
+        a dot, and the dot sits there on the phosphor for a moment after
+        there is nothing driving it.
+
+        Doing it in that order is the whole effect. Fading the picture to
+        black and calling it a power-off is what it looks like when someone
+        has only ever seen it described.
+        """
+        w, h = im.size
+        q = max(0.0, min(1.0, q))
+        out = Image.new("RGB", (w, h), (0, 0, 0))
+        lh = max(2, int(round(3 * self.kk)))
+        cx, cy = w // 2, h // 2
+        if q < 0.50:                                  # the raster squeezes
+            t = q / 0.50
+            hh = max(lh, int(h * (1.0 - t) ** 1.7))
+            band = im.resize((w, hh), Image.BILINEAR)
+            band = band.point(lambda v: min(255, int(v * (1.0 + 2.2 * t))))
+            out.paste(band, (0, (h - hh) // 2))
+        elif q < 0.80:                                # the line shortens
+            t = (q - 0.50) / 0.30
+            ww = max(2, int(w * (1.0 - t) ** 1.4))
+            ImageDraw.Draw(out).rectangle(
+                [cx - ww // 2, cy - lh // 2, cx + ww // 2, cy + lh // 2],
+                fill=self.off_color)
+        else:                                         # the dot decays
+            t = (q - 0.80) / 0.20
+            r = max(1, int(lh * 1.7 * (1.0 - t)))
+            c = tuple(int(v * (1.0 - t) ** 1.5) for v in self.off_color)
+            ImageDraw.Draw(out).ellipse([cx - r, cy - r, cx + r, cy + r],
+                                        fill=c)
+        glow = out.filter(ImageFilter.GaussianBlur(self.blur * 1.6))
+        return ImageChops.screen(out, glow.point(lambda v: int(v * 0.85)))
+
+    def __call__(self, im: Image.Image, q=None) -> Image.Image:
         im = im.convert("RGB")
         if self.shift:
             r, g, b = im.split()
@@ -283,13 +328,28 @@ class CRT:
         if self.vig > 0:
             im = ImageChops.multiply(im, Image.merge(
                 "RGB", (self.vig_mask(),) * 3))
+        # Last, and over the finished tube: it is the tube that is dying.
+        if q is not None:
+            im = self.power_off(im, q)
         return im
 
 
-def post_fx(obj, im):
-    """the finished frame, through whatever whole-frame pass the spec asked for"""
+def post_fx(obj, im, n=None, nf=None):
+    """the finished frame, through whatever whole-frame pass the spec asked for.
+
+    `n` and `nf` are only needed by a pass that has to know where the end is
+    -- at present the CRT's power-off, which takes the last `shutdown`
+    seconds of the clip rather than adding any.
+    """
     fx = getattr(obj, "crt_fx", None)
-    return fx(im) if fx is not None else im
+    if fx is None:
+        return im
+    q = None
+    if fx.shutdown > 0 and n is not None and nf:
+        start = nf - int(round(fx.shutdown * float(getattr(obj, "fps", 60))))
+        if n >= start:
+            q = (n - start) / float(max(1, nf - 1 - start))
+    return fx(im, q)
 
 
 class Renderer:
@@ -1153,7 +1213,7 @@ class Renderer:
 
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def phase(self, t: float):
@@ -2312,7 +2372,7 @@ class ExplodeRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:
@@ -3065,7 +3125,7 @@ class DonutRenderer(Furniture):
             os.remove(os.path.join(self.outdir, f))
         nf = int(round(self.total() * self.fps))
         for n in range(nf):
-            post_fx(self, self.frame(n)).save(f"{self.outdir}/f{n:05d}.png")
+            post_fx(self, self.frame(n), n, nf).save(f"{self.outdir}/f{n:05d}.png")
         return nf
 
     def frame(self, n: int) -> Image.Image:

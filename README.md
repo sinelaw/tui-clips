@@ -617,6 +617,25 @@ makes it a thing with glass in front of it, and it brings the rounded-off
 corner of the tube with it for free. The first version of this pass had
 everything but the curve and was politely described as not visible.
 
+### Powering it off
+
+`"shutdown": 1.5` spends the last second and a half of the clip turning the
+tube off instead of holding the last frame and fading:
+
+    the raster squeezes vertically into one over-bright horizontal line
+    -> the line shortens to a dot
+    -> the dot decays on the phosphor
+
+The order is the whole effect, and so is the brightening: it is the same beam
+energy over a fraction of the height, which is why a dying CRT gets *brighter*
+as it collapses rather than dimmer. Fading the picture to black instead is
+what a power-off looks like to someone who has only ever read a description
+of one.
+
+It takes the end of the clip rather than adding to it, so whatever is left of
+the last beat in front of it is the final hold — lengthen that beat if you
+want longer on the finished screen.
+
 Keep the comb light. A deep one is the first thing h.264 turns to mush, and a
 one-pixel line every three pixels is a moire pattern once the video is scaled
 down a feed — so `gap` comes down with the canvas like every other constant
