@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 
-from PIL import Image, ImageChops  # noqa: E402
+from PIL import Image, ImageChops, ImageStat  # noqa: E402
 
 import capture as cap  # noqa: E402
 import render  # noqa: E402
@@ -730,6 +730,89 @@ def test_mark_and_at_reach_tui_capture(tmp):
           "a mark step becomes --mark")
     check(mod.step_argv({"at": 12.5}, "solo", tmp, {}) == ["--at", "12.5"],
           "an at step becomes --at")
+
+
+def test_shatter_breaks_the_old_screen_and_sweeps_the_new_one_in(tmp):
+    """the outgoing screen leaves in pieces; the incoming one arrives behind.
+
+    A push and a wipe both say "and then this". A shatter is for the one
+    boundary in a clip that is not continuous -- a different part of the same
+    window rather than a later state of the same part -- so the test is that
+    the two screens are doing *different* things at the same moment: the old
+    one is coming apart, on a curve that leaves it readable until it does,
+    and the new one is sweeping in behind it.
+    """
+    a = solid(os.path.join(tmp, "a.png"), (200, 0, 0))
+    b = solid(os.path.join(tmp, "b.png"), (0, 0, 200))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 0.5},
+           {"shot": "b", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 0.5, "transition": "shatter",
+            "shatter": {"cols": 6, "rows": 4, "spread": 1.2, "spin": 0}}]
+    r = render.make(spec_for(tmp, annotations=ann,
+                             timing={"intro": 0, "zoom": 0, "hold": 0.5,
+                                     "pan": 0.2, "push": 0.6, "outro": 0.2}),
+                    {"solo": a}, os.path.join(tmp, "f"), {"a": a, "b": b})
+
+    check(r.gap(0) == 0.6, "a shatter takes `push`'s travel when it has none of its own")
+
+    w = h = 400
+
+    def at(pan):
+        lay = Image.new("RGB", (w, h), (0, 0, 0))
+        r.shattered(lay, 0, 1, pan, w, h)
+        return lay
+
+    def moved(im):
+        """how far the frame has travelled from the whole old screen"""
+        d = ImageChops.difference(im, at(0.0))
+        return sum(ImageStat.Stat(d).mean) / 3.0
+
+    check(at(0.0).getpixel((w // 2, h // 2)) == (200, 0, 0),
+          "at the start of the travel the old screen is still whole")
+    # Quadratic: a tenth of the way in, almost nothing has happened yet, which
+    # is what keeps the outgoing picture readable up to the moment it breaks.
+    early, mid = moved(at(0.12)), moved(at(0.5))
+    check(early < 12, f"a tenth of the way in the picture is still itself ({early:.1f})")
+    check(mid > 3 * early, f"and half way it has come apart ({mid:.1f})")
+
+    check(at(0.9).getpixel((2, 2)) == (0, 0, 200),
+          "by the end the arrival has swept the frame")
+
+def test_shatter_is_the_same_break_every_render(tmp):
+    """tile jitter is hashed off the tile index, not drawn from `random`.
+
+    A draft has to be the render it stands in for, and two runs of one spec
+    have to agree -- so the scatter is deterministic. It also has to be a
+    scatter: if every tile moved by the same vector the effect would be a
+    slide with extra steps.
+    """
+    a = solid(os.path.join(tmp, "a.png"), (200, 0, 0))
+    b = solid(os.path.join(tmp, "b.png"), (0, 0, 200))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False},
+           {"shot": "b", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "transition": "shatter",
+            "shatter": {"cols": 5, "rows": 5, "spread": 0.8, "spin": 10,
+                        "sweep": False}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a, "b": b})
+    w = h = 300
+    one = Image.new("RGB", (w, h), (0, 0, 0))
+    two = Image.new("RGB", (w, h), (0, 0, 0))
+    r.shattered(one, 0, 1, 0.45, w, h)
+    r.shattered(two, 0, 1, 0.45, w, h)
+    check(ImageChops.difference(one, two).getbbox() is None,
+          "two renders of one moment are identical")
+
+    # Corners travel further than the middle, because a tile is displaced by
+    # its own distance from the centre -- which is what makes it a burst
+    # rather than a grid coming apart evenly.
+    far = Image.new("RGB", (w, h), (0, 0, 0))
+    r.shattered(far, 0, 1, 0.6, w, h)
+    check(far.getpixel((4, 4)) != (200, 0, 0),
+          "the corner tile has left its corner")
+    check(far.getpixel((w // 2, h // 2))[0] > 100,
+          "the middle tile is still where it was")
 
 
 def main():

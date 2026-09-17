@@ -510,7 +510,7 @@ the dimmed bands, the captions, the outro — is identical.
        "note_at": "below-right",       // above|below x left|right
        "label": "BEFORE",              // this beat's banner ...
        "tone": "before",               // ... and its colour, a theme key
-       "transition": "push",           // shove the last screen out, don't fade
+       "transition": "push",           // or "wipe" / "shatter"; default is a fade
        "head": "where you are"}        // `sub` is optional
     ]
   },
@@ -760,6 +760,49 @@ Two tags either side of a wipe do not cross-fade. Each is clipped to its own
 side of the moving edge, so the words are replaced in place exactly as the
 screen under them is -- which is what you want when both tags sit at the same
 spot, and that shared position is the point of them.
+
+## Breaking out of one subject into another
+
+`"transition": "shatter"` cuts the outgoing screen into a grid and throws the
+pieces off the frame while the next one sweeps in behind them.
+
+```jsonc
+{"shot": "settle", "view": "bar", "transition": "shatter",
+ "shatter": {"cols": 12, "rows": 9, "spread": 1.15, "spin": 14}}
+```
+
+It is the one transition that is not about continuity. A `push` and a `wipe`
+both say *and then this*; a shatter says *forget that, look here*, which is
+what a clip needs when the next beat is a **different part of the same
+window** rather than a later state of the same part. Use it once. Two of them
+in a clip and the picture is the effect.
+
+`cols` x `rows` is the grid (default 12 x 9 -- fine enough that a tile is a
+piece of the picture rather than a quarter of it, coarse enough that the count
+stays in the low hundreds, since every tile is a rotate and a paste on every
+frame of the travel). `spread` is how far the furthest tiles travel, in frame
+widths (default 1.15); `spin` is their rotation in degrees at full travel
+(default 14); `sweep` (default `true`) wipes the arrival in behind a bright
+edge in the beat's `tone`, exactly as [`wipe`](#wiping-one-beat-onto-the-next)
+does -- set it `false` to have the next screen simply sit there while the old
+one comes apart. It takes `timing.shatter`, falling back to `timing.push`.
+
+Three things about the motion are deliberate, and all three are what stop it
+reading as a filter:
+
+- **It accelerates.** Displacement is quadratic in the travel, so the first
+  third of it barely moves; the outgoing picture stays readable right up to
+  the moment it stops being one.
+- **A tile moves by its own distance from the centre**, not a fixed distance
+  along it. Normalising would send every tile the same way-out, which is a
+  grid dissolving evenly rather than something breaking: the corners have to
+  outrun the middle. The middle barely moves, and the fade carries it out.
+- **The jitter is hashed off the tile's index**, never drawn from `random`, so
+  two renders of one spec agree and a `--draft` is the render it stands in
+  for.
+
+Tags either side of a shatter ride its edge rather than cross-fading, the same
+way they do across a wipe.
 
 ## Before and after in one clip
 

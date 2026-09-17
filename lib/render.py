@@ -612,9 +612,10 @@ class Renderer:
     def gap(self, i: int) -> float:
         """the travel out of beat i.
 
-        A push moves a whole screen the width of the frame, and a wipe drags
-        an edge across it; both want longer than the cross-fade a pan is, so
-        both take their own timing. `wipe` falls back to `push`'s, which is
+        A push moves a whole screen the width of the frame, a wipe drags an
+        edge across it, and a shatter throws it off the frame in pieces; all
+        three want longer than the cross-fade a pan is, so all three take
+        their own timing. `wipe` and `shatter` fall back to `push`'s, which is
         the right order of magnitude for the same reason.
         """
         if i + 1 < len(self.ann):
@@ -623,6 +624,8 @@ class Renderer:
                 return float(self.t["push"])
             if t == "wipe":
                 return float(self.t.get("wipe", self.t["push"]))
+            if t == "shatter":
+                return float(self.t.get("shatter", self.t["push"]))
         return float(self.t["pan"])
 
     def total(self) -> float:
@@ -777,6 +780,110 @@ class Renderer:
             return cur
         nxt = (self.shots[run[k + 1]], f"shot:{run[k + 1]}")
         return (*cur, *nxt, (frac - (1 - xf)) / xf)
+
+    # Grid for a shatter. Fine enough that a tile is a piece of the picture
+    # rather than a quarter of it, coarse enough that the count stays in the
+    # low hundreds -- every tile is a rotate and a paste, and this runs on
+    # every frame of the travel.
+    SHATTER_COLS = 12
+    SHATTER_ROWS = 9
+
+    def shattered(self, lay, ai: int, nxt: int, pan: float,
+                  cwi: int, chi: int) -> None:
+        """draw the shatter travel from beat `ai` to beat `nxt` into `lay`.
+
+        The next screen is laid down first, at its own camera, and then swept
+        in behind a hard edge -- so the arrival is a wipe, and what the wipe
+        uncovers is the new framing rather than the old one changed. Over the
+        top, the outgoing screen is cut into a grid and each tile is thrown
+        outward from the centre, spun a little and faded.
+
+        Tiles are displaced along the vector from the frame's centre, so the
+        break reads as an outward burst rather than a slide, and every offset
+        is a deterministic function of the tile's index -- the same jitter on
+        every render, which is what lets a draft stand in for the real thing.
+        Acceleration is quadratic: tiles barely move for the first third of
+        the travel, which keeps the picture readable right up to the moment
+        it stops being one.
+        """
+        th = self.th
+        cfg = self.ann[nxt].get("shatter") or {}
+        ncol = max(2, int(cfg.get("cols", self.SHATTER_COLS)))
+        nrow = max(2, int(cfg.get("rows", self.SHATTER_ROWS)))
+        spread = float(cfg.get("spread", 1.15))   # frame-widths at full travel
+        spin = float(cfg.get("spin", 14.0))       # degrees at full travel
+        sweep = cfg.get("sweep", True)            # wipe the arrival in?
+        fill = self.chrome.fill if self.chrome else th["bg"]
+
+        # ── the arrival ────────────────────────────────────────────────────
+        sk, sxk, syk = self.cam(nxt)
+        inc = Image.new("RGB", (cwi, chi), fill)
+        inc.paste(self.screen(nxt, 0.0, sk),
+                  (int(round(cwi / 2 - sxk * sk)),
+                   int(round(chi / 2 - syk * sk))))
+        if sweep:
+            edge_x = int(round(cwi * ease(pan)))
+            mask = Image.new("L", (cwi, chi), 0)
+            ImageDraw.Draw(mask).rectangle([0, 0, edge_x, chi - 1], fill=255)
+            lay.paste(inc, (0, 0), mask)
+            ew = self.k(4)
+            if 0 < edge_x < cwi:
+                ImageDraw.Draw(lay).rectangle(
+                    [max(0, edge_x - ew), 0, edge_x, chi - 1],
+                    fill=tuple(th[self.ann[nxt].get("tone", "after")]))
+        else:
+            lay.paste(inc, (0, 0))
+
+        # ── the departure ──────────────────────────────────────────────────
+        sa, sxa, sya = self.cam(ai)
+        out = Image.new("RGB", (cwi, chi), fill)
+        out.paste(self.screen(ai, 1.0, sa),
+                  (int(round(cwi / 2 - sxa * sa)),
+                   int(round(chi / 2 - sya * sa))))
+        # Quadratic, so the first third of the travel is nearly still.
+        p = pan * pan
+        alpha = int(255 * max(0.0, 1.0 - pan * pan * pan))
+        if alpha <= 0:
+            return
+        tw, tht = cwi / ncol, chi / nrow
+        cx, cy = cwi / 2.0, chi / 2.0
+        nrm = math.hypot(cx, cy) or 1.0    # a corner's distance from centre
+        reach = spread * max(cwi, chi)
+        for r in range(nrow):
+            for c in range(ncol):
+                x0, y0 = int(round(c * tw)), int(round(r * tht))
+                x1, y1 = int(round((c + 1) * tw)), int(round((r + 1) * tht))
+                w, h = x1 - x0, y1 - y0
+                tile = out.crop((x0, y0, x1, y1)).convert("RGBA")
+                # Deterministic per-tile jitter: an integer hash of the index,
+                # not `random`, so two renders of one spec agree and a draft
+                # is the render it stands in for.
+                hsh = (c * 73856093) ^ (r * 19349663)
+                jx = ((hsh >> 3) % 1000) / 1000.0 - 0.5
+                jy = ((hsh >> 13) % 1000) / 1000.0 - 0.5
+                jr = ((hsh >> 23) % 1000) / 1000.0 - 0.5
+                # Displace along the vector from the frame's centre, and by
+                # how long that vector is -- not by a fixed distance along it.
+                # Normalising would send every tile the same distance in a
+                # different direction, which is a scatter and not a burst: the
+                # corners have to outrun the middle or the picture comes apart
+                # evenly, like a grid dissolving rather than something
+                # breaking. The middle barely moves and is carried out by the
+                # fade instead.
+                vx = (x0 + x1) / 2.0 - cx + jx * tw
+                vy = (y0 + y1) / 2.0 - cy + jy * tht
+                dx, dy = vx / nrm * reach * p, vy / nrm * reach * p
+                if spin:
+                    tile = tile.rotate(spin * p * (1.0 + 2.0 * jr),
+                                       resample=Image.BILINEAR, expand=True)
+                a = tile.getchannel("A")
+                if alpha < 255:
+                    a = a.point(lambda v, m=alpha: v * m // 255)
+                # `paste` rather than `alpha_composite`: tiles leave the frame,
+                # and alpha_composite refuses a destination outside it.
+                lay.paste(tile.convert("RGB"),
+                          (int(round(x0 - (tile.width - w) / 2 + dx)),
+                           int(round(y0 - (tile.height - h) / 2 + dy))), a)
 
     def screen(self, i: int, hp: float, s: float):
         """beat i's scaled screen at hold-progress `hp`"""
@@ -1553,7 +1660,17 @@ class Renderer:
         # -- which says "another screen" when what happened is "this screen,
         # changed".
         wipe = pan > 0 and self.ann[nxt].get("transition") == "wipe"
-        if push:
+        # A shatter breaks the outgoing screen into tiles and throws them off
+        # the frame while the next one arrives behind. It is the one
+        # transition that is not about continuity: a push and a wipe both say
+        # "and then this", and a shatter says "forget that, look here" --
+        # which is what a clip needs when the next beat is a different part of
+        # the same window rather than a later state of the same part. Use it
+        # once. Two of them in a clip and the picture is the effect.
+        shatter = pan > 0 and self.ann[nxt].get("transition") == "shatter"
+        if shatter:
+            self.shattered(lay, ai, nxt, pan, cwi, chi)
+        elif push:
             for k, hpk, off in ((ai, 1.0, -pan * cwi), (nxt, 0.0, (1 - pan) * cwi)):
                 sk, sxk, syk = self.cam(k)
                 lay.paste(self.screen(k, hpk, sk),
@@ -1591,7 +1708,7 @@ class Renderer:
         # The pointer goes on the screen, under the annotation layer: it is
         # part of what was filmed, so the dim that falls on the screen falls
         # on it too.
-        if self.cursor_cfg is not None and not push and not wipe:
+        if self.cursor_cfg is not None and not push and not wipe and not shatter:
             cov = Image.new("RGBA", lay.size, (0, 0, 0, 0))
             drew = False
             for k, alpha in ((ai, int(255 * (1.0 - pan))), (nxt, int(255 * pan))):
@@ -1674,16 +1791,21 @@ class Renderer:
         # exactly what a zoomed-in camera produces.
         #
         # A tag names the beat, so it survives the travel rather than blinking
-        # off with the band. Across a wipe it rides the edge: both tags are
-        # drawn at full strength and each clipped to its own side of the moving
-        # line, so the words are replaced in place exactly as the screen under
-        # them is. Cross-fading them would put one word on top of the other --
-        # and sharing a position is the whole point of them.
+        # off with the band. Across a wipe -- or a shatter, which sweeps its
+        # arrival in the same way -- it rides the edge: both tags are drawn at
+        # full strength and each clipped to its own side of the moving line,
+        # so the words are replaced in place exactly as the screen under them
+        # is. Cross-fading them would put one word on top of the other -- and
+        # sharing a position is the whole point of them.
         if tvis > 0.015 and any(self.ann[k].get("tag") for k in (ai, nxt)):
             fw, fh = cv.size
             tov = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
-            if wipe:
-                ex = max(0, min(fw, pos[0] + int(round(cwi * pan))))
+            if wipe or shatter:
+                # Both drag a hard edge across the frame; the shatter's is
+                # eased, so take the same curve its own sweep uses or the
+                # words come uncoupled from the picture under them.
+                w = ease(pan) if shatter else pan
+                ex = max(0, min(fw, pos[0] + int(round(cwi * w))))
                 for k, box in ((ai, (ex, 0, fw, fh)), (nxt, (0, 0, ex, fh))):
                     if box[2] <= box[0]:
                         continue
