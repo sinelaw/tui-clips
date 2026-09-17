@@ -761,6 +761,54 @@ side of the moving edge, so the words are replaced in place exactly as the
 screen under them is -- which is what you want when both tags sit at the same
 spot, and that shared position is the point of them.
 
+## Taking one screen apart, inside a solo clip
+
+An [explode spec](#explode-specs) is a whole clip shape: it takes a capture
+apart and gives every piece its own beat. A solo clip can do the smaller
+version of the same thing in **one beat** — name some rects, deal them out of
+the picture, label them:
+
+```jsonc
+{"shot": "settle", "view": "bar", "hold": 2.9,
+ "explode": {
+   "dim": 0.75,                 // how far the rest of the screen falls back
+   "at": 0.35, "over": 0.85,    // seconds into the hold: when, and how long
+   "pieces": [
+     {"rows": [1, 2], "cols": [0, 9],   "offset": [19, 3], "label": "new workspace"},
+     {"rows": [1, 2], "cols": [28, 36], "offset": [-6, 6], "label": "search"},
+     {"rows": [1, 2], "cols": [38, 39], "offset": [-9, 9], "label": "menu"}]}}
+```
+
+A piece is drawn at its own rect plus its `offset`, in **cells**; the scale is
+applied at render time, so a spec written against a
+[UI dump](#where-the-rects-come-from) is in the program's own coordinates and
+survives a font or geometry change. Give `offset` outright, or let `spread`
+derive one from where the piece sits inside its `container` (which defaults to
+the beat's `view` rect, then to the whole capture) — the same rule the explode
+*shape* uses, so a plan written for one reads in the other.
+
+The hole a piece leaves is drawn as ground, not as a dimmed copy: a control
+that has moved must not leave a ghost where it was, or the picture says it is
+in two places. Everything not lifted falls back by `dim` as the move goes, so
+the pieces are what the eye lands on — which also means **an offset is a move
+within the capture**. There is nothing above row 0 to move into, so pieces are
+dealt down and sideways into whatever the screen has room for, and a piece set
+down on top of text reads as two things in one place however far back the text
+is pushed.
+
+`at` and `over` are seconds into the beat's hold rather than shares of it, so
+retiming a beat does not retime the move inside it — the same reason
+[`swipe`](#swiping-one-screen-onto-another) counts in seconds. `over: 0` means
+*already apart*, which is what the next beat wants when it is holding open
+what this one opened.
+
+Each piece with a `label` gets a chip, and a hairline around the piece for the
+chip to belong to. Both are drawn at frame scale, like a tag and unlike the
+picture: words about a picture are not part of it, so they keep their size
+however far in the camera is. `label_at` is `above` (default) or `below`, and
+a chip with no room above takes the space below instead. `chip_size` on
+`render` sets the type size.
+
 ## Breaking out of one subject into another
 
 `"transition": "shatter"` cuts the outgoing screen into a grid and throws the

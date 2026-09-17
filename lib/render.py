@@ -595,6 +595,8 @@ class Renderer:
         self.f_cap = ImageFont.truetype(BOLD, self.k(40))
         self.f_sub = ImageFont.truetype(MONO, self.k(23))
         self.f_note = ImageFont.truetype(BOLD, self.k(r.get("note_size", 30)))
+        # Small, for the chips an `explode` beat hangs off its pieces.
+        self.f_chip = ImageFont.truetype(BOLD, self.k(r.get("chip_size", 26)))
 
         self._cache: dict = {}
 
@@ -887,6 +889,8 @@ class Renderer:
 
     def screen(self, i: int, hp: float, s: float):
         """beat i's scaled screen at hold-progress `hp`"""
+        if self.ann[i].get("explode"):
+            return self.exploded(i, hp, s)
         if self.ann[i].get("swipe"):
             return self.swiped(i, hp, s)
         sh = self.shot(i, hp)
@@ -894,6 +898,141 @@ class Renderer:
         if len(sh) == 5:
             base = Image.blend(base, self.scaled(sh[2], s, sh[3]), sh[4])
         return base
+
+    def explode_pieces(self, i: int):
+        """beat i's pieces as (src-rect-in-cells, offset-in-cells, label, at)
+
+        `offset` is the whole of what exploding means here: a piece is drawn at
+        its own rect plus its offset, and nothing else moves. Give it outright,
+        or let `spread` derive one from where the piece sits inside its
+        container -- the same rule the explode *shape* uses, so a plan written
+        for one reads in the other.
+        """
+        ex = self.ann[i]["explode"]
+        cont = ex.get("container")
+        if cont is None and self.ann[i].get("view"):
+            cont = self.views[self.ann[i]["view"]]
+        if cont is None:
+            cont = {"rows": [0, self.rows], "cols": [0, self.cols]}
+        cr = [float(v) for v in cont["rows"]]
+        cc = [float(v) for v in cont["cols"]]
+        sx, sy = _pair(ex.get("spread", 0.45))
+        out = []
+        for d in ex.get("pieces", []):
+            r0, r1 = (float(v) for v in d["rows"])
+            c0, c1 = (float(v) for v in d.get("cols", cc))
+            if "offset" in d:
+                off = (float(d["offset"][0]), float(d["offset"][1]))
+            else:
+                off = (((c0 + c1) - (cc[0] + cc[1])) / 2 * sx,
+                       ((r0 + r1) - (cr[0] + cr[1])) / 2 * sy)
+            out.append(((c0, r0, c1, r1), off, d.get("label", ""),
+                        d.get("label_at", "above")))
+        return out
+
+    def explode_at(self, i: int, hp: float) -> float:
+        """how far beat i has come apart, 0..1.
+
+        `at` and `over` are seconds into the beat's hold, not shares of it, so
+        a group keeps its pace when the beat is retimed -- the same reason
+        `swipe` counts in seconds. `over: 0` means "already apart", which is
+        what a following beat wants when it is holding what this one opened.
+        """
+        ex = self.ann[i]["explode"]
+        t = hp * self.hold(i) - float(ex.get("at", 0.0))
+        if t < 0:
+            return 0.0
+        over = float(ex.get("over", 0.6))
+        if over <= 0:
+            return 1.0
+        return ease(min(1.0, t / over))
+
+    def exploded(self, i: int, hp: float, s: float):
+        """beat i's screen with its named elements pulled out of it.
+
+        A `swipe` replaces rows of one screen with rows of another; this takes
+        one screen apart. Each named rect is lifted off and set down again
+        somewhere else, the hole it came from is left as ground, and what is
+        left behind falls back so the pieces are what the eye lands on.
+
+        The offsets are in *cells*, so a spec written against a UI dump is in
+        the program's own coordinates and survives a font or geometry change
+        -- the scale is applied here and nowhere else.
+        """
+        sh = self.shot(i, hp)
+        base = self.scaled(sh[0], s, sh[1])
+        prog = self.explode_at(i, hp)
+        if prog <= 0.001:
+            return base
+        ex = self.ann[i]["explode"]
+        cw, rh = self.CW * s, self.RH * s
+        img = base.copy()
+        dim = float(ex.get("dim", 0.55)) * prog
+        if dim > 0.004:
+            img = Image.blend(img, Image.new("RGB", img.size, self.th["bg"]), dim)
+        d = ImageDraw.Draw(img)
+        cut = []
+        for (c0, r0, c1, r1), off, _lb, _at in self.explode_pieces(i):
+            box = (int(round(c0 * cw)), int(round(r0 * rh)),
+                   int(round(c1 * cw)), int(round(r1 * rh)))
+            if box[2] <= box[0] or box[3] <= box[1]:
+                continue
+            cut.append((base.crop(box), box, off))
+            # The hole is ground, not a dimmed copy: a piece that has moved
+            # must not leave a ghost of itself where it was.
+            d.rectangle([box[0], box[1], box[2] - 1, box[3] - 1],
+                        fill=tuple(self.th["bg"]))
+        for tile, box, off in cut:
+            img.paste(tile, (int(round(box[0] + off[0] * cw * prog)),
+                             int(round(box[1] + off[1] * rh * prog))))
+        return img
+
+    def explode_chips(self, cv, i: int, hp: float, org, s: float,
+                      alpha: int) -> None:
+        """label every exploded piece, on the canvas rather than the panel.
+
+        A chip is drawn at frame scale, like a tag and unlike the picture, so
+        it stays the same size however far the camera is zoomed in -- words
+        about a picture are not part of it.
+        """
+        if not self.ann[i].get("explode") or alpha < 8:
+            return
+        pieces = [p for p in self.explode_pieces(i) if p[2]]
+        if not pieces:
+            return
+        prog = self.explode_at(i, hp)
+        if prog < 0.12:
+            return
+        a = int(alpha * min(1.0, (prog - 0.12) / 0.25))
+        cw, rh = self.CW * s, self.RH * s
+        ov = Image.new("RGBA", cv.size, (0, 0, 0, 0))
+        od = ImageDraw.Draw(ov)
+        pad, gap = self.k(9), self.k(10)
+        for (c0, r0, c1, r1), off, label, at in pieces:
+            x0 = org[0] + (c0 + off[0] * prog) * cw
+            y0 = org[1] + (r0 + off[1] * prog) * rh
+            x1, y1 = x0 + (c1 - c0) * cw, y0 + (r1 - r0) * rh
+            # The piece keeps a hairline so the chip has something to belong to.
+            od.rectangle([x0 - 1, y0 - 1, x1, y1],
+                         outline=(*self.th["after"], int(a * 0.55)),
+                         width=max(1, self.k(2)))
+            tb = od.textbbox((0, 0), label, font=self.f_chip)
+            w, h = tb[2] - tb[0] + 2 * pad, tb[3] - tb[1] + 2 * pad
+            cx = (x0 + x1) / 2 - w / 2
+            cy = y0 - gap - h if at != "below" else y1 + gap
+            if cy < self.header_h:                       # no room above
+                cy = y1 + gap
+            cx = max(self.k(8), min(cv.size[0] - w - self.k(8), cx))
+            chip = Image.new("RGBA", (int(w), int(h)), (0, 0, 0, 0))
+            cd = ImageDraw.Draw(chip)
+            cd.rounded_rectangle([0, 0, w - 1, h - 1], radius=self.k(8),
+                                 fill=(*self.th["caption_bg"], int(a * 0.92)),
+                                 outline=(*self.th["after"], int(a * 0.55)),
+                                 width=1)
+            cd.text((w / 2, h / 2), label, font=self.f_chip,
+                    fill=(*self.th["after"], a), anchor="mm")
+            ov.paste(chip, (int(cx), int(cy)), chip)
+        cv.alpha_composite(ov)
 
     def swiped(self, i: int, hp: float, s: float):
         """beat i's screen with a row-wise wipe from `shot` to `swipe.to`.
@@ -1783,6 +1922,20 @@ class Renderer:
         lay = self.vignetted(lay, max(0.0, (p - 0.55) / 0.45))
         pos = (int(round(cx - cw / 2)), int(round(cy - ch / 2)))
         cv.paste(lay, pos)
+
+        # Chips for an `explode` beat, on the canvas for the same reason tags
+        # are: they are words about the picture, not part of it, so they keep
+        # their size however far in the camera is. They go under the tag, which
+        # names the whole beat.
+        if (not push and not wipe and not shatter
+                and any(self.ann[k].get("explode") for k in (ai, nxt))):
+            org = (pos[0] + px, pos[1] + py)
+            cv = cv.convert("RGBA")
+            self.explode_chips(cv, ai, 1.0 if pan > 0 else hp, org, s,
+                               int(255 * tvis * (1.0 - pan)))
+            if pan > 0:
+                self.explode_chips(cv, nxt, 0.0, org, s, int(255 * tvis * pan))
+            cv = cv.convert("RGB")
 
         # Tags are placed against the *frame*, not against the camera's panel.
         # The panel is whatever size the current scale makes it and is pasted

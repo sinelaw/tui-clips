@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 
-from PIL import Image, ImageChops, ImageStat  # noqa: E402
+from PIL import Image, ImageChops, ImageDraw, ImageStat  # noqa: E402
 
 import capture as cap  # noqa: E402
 import render  # noqa: E402
@@ -813,6 +813,86 @@ def test_shatter_is_the_same_break_every_render(tmp):
           "the corner tile has left its corner")
     check(far.getpixel((w // 2, h // 2))[0] > 100,
           "the middle tile is still where it was")
+
+
+def banded(path, ground, band, box, w=600, h=400):
+    """a flat screen with one rect in another colour, to track a piece by"""
+    im = Image.new("RGB", (w, h), ground)
+    ImageDraw.Draw(im).rectangle(box, fill=band)
+    im.save(path)
+    return path
+
+
+def test_explode_lifts_a_named_rect_and_leaves_ground(tmp):
+    """a piece is drawn at its rect plus its offset; its hole is ground.
+
+    This is the whole of what a beat-level explode means. The hole matters as
+    much as the move: a piece that has gone somewhere must not leave a copy of
+    itself where it was, or the picture says the control is in two places.
+    """
+    # rows 1..2, cols 0..9 of a 60x20 capture -> (0, 20)-(90, 40) at 600x400
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"dim": 0.0, "at": 0.0, "over": 0.5, "pieces": [
+                {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5],
+                 "label": "the piece"}]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    red, blue = (200, 0, 0), (0, 0, 200)
+    bg = tuple(r.th["bg"])
+
+    start = r.screen(0, 0.0, 1.0)
+    check(start.getpixel((10, 30)) == red, "before it starts the piece is where it was")
+
+    end = r.screen(0, 0.999, 1.0)
+    check(end.getpixel((10, 30)) == bg, "once open its old place is ground, not a ghost")
+    check(end.getpixel((10, 30 + 5 * r.RH)) == red, "and the piece is five rows down")
+    check(end.getpixel((10, 300)) == blue, "the rest of the screen is untouched")
+
+
+def test_explode_dims_what_it_did_not_lift(tmp):
+    """the pieces are what the eye lands on, so everything else falls back."""
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"dim": 0.8, "at": 0.0, "over": 0.5, "pieces": [
+                {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5]}]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    end = r.screen(0, 0.999, 1.0)
+    rest = end.getpixel((10, 300))
+    check(rest != (0, 0, 200) and rest[2] < 90,
+          f"the untouched screen has fallen back ({rest})")
+    check(end.getpixel((10, 30 + 5 * r.RH)) == (200, 0, 0),
+          "the piece itself has not -- it is what the beat is about")
+
+
+def test_explode_counts_in_seconds_and_can_start_already_open(tmp):
+    """`at` and `over` are seconds into the hold, and `over: 0` is 'open'.
+
+    Shares of the hold would mean retiming a beat retimed the move inside it;
+    seconds are what let a following beat hold what this one opened, which is
+    what `over: 0` is for.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    piece = {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5]}
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 4.0,
+            "explode": {"at": 1.0, "over": 1.0, "pieces": [piece]}},
+           {"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"at": 0.0, "over": 0, "pieces": [piece]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    check(r.explode_at(0, 0.24) == 0.0, "nothing happens before `at`")
+    check(r.explode_at(0, 0.375) > 0.0, "it is moving a quarter of a second in")
+    check(r.explode_at(0, 0.5) == 1.0, "and finished after `over` seconds")
+    check(r.explode_at(0, 0.9) == 1.0, "... and stays finished for the rest of the hold")
+    check(r.explode_at(1, 0.0) == 1.0, "`over: 0` starts open, for a beat that holds one")
 
 
 def main():
