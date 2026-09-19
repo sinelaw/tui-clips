@@ -1,5 +1,5 @@
 {
-  "name": "fresh-source-breakdown",
+  "name": "fresh-source-peel",
   "render": {
     "size": [
       1080,
@@ -8,15 +8,18 @@
     "fps": 60,
     "title": "fresh 0.5.1 — source by concern",
     "intro_caption": [
-      "908k lines of fresh",
-      "every crate, Rust and TypeScript alike"
+      "code + tests",
+      ""
     ],
     "outro_caption": [
-      "51% of it is tests",
-      "339k end-to-end, 0.0k in the files they test"
+      "",
+      ""
     ],
+    "labels": {
+      "donut": "all code"
+    },
     "timing": {
-      "hold": 2.8
+      "hold": 2.6
     },
     "donut": {
       "style": "ansi",
@@ -112,8 +115,7 @@
             148,
             163,
             184
-          ],
-          "visit": false
+          ]
         },
         {
           "label": "Input & keys",
@@ -157,6 +159,42 @@
             74,
             222,
             128
+          ]
+        }
+      ],
+      "peel": [
+        {
+          "read": [
+            "End-to-end tests",
+            "Inline unit tests"
+          ],
+          "drop": [
+            "End-to-end tests",
+            "Inline unit tests"
+          ],
+          "gather": [
+            "51% tests",
+            ""
+          ],
+          "title": "code only (no tests)",
+          "total": "445k lines"
+        },
+        {
+          "read": [
+            "Plugins (TS)"
+          ],
+          "drop": [
+            "Plugins (TS)"
+          ],
+          "title": "core only (rust)",
+          "total": "363k lines"
+        },
+        {
+          "read": [
+            "Editor app",
+            "Rendering & UI",
+            "Services & IPC",
+            "Text model"
           ]
         }
       ]

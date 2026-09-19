@@ -32,7 +32,6 @@ font or geometry change.
 """
 from __future__ import annotations
 
-import bisect
 import glob
 import json
 import math
@@ -2492,7 +2491,15 @@ class ExplodeRenderer(Furniture):
 DEFAULT_DONUT_TIMING = {
     "grow": 1.2, "intro": 2.2, "move": 0.55, "hold": 3.0,
     "regroup": 0.6, "outro": 2.0,
+    # a peel's four extra beats: light what is leaving, throw it out, let the
+    # rest grow into the gap, and stand still long enough to be read again
+    "gather": 0.7, "eject": 1.1, "reflow": 1.3, "settle": 2.2,
 }
+
+# How far out of the ring an ejected section travels, in ring radii. Far
+# enough to be off the frame at the establishing camera, so what leaves is
+# gone rather than parked.
+EJECT_REACH = 3.2
 # How long the labels take to arrive and to go. They are not carried by the
 # camera, they are cut in and out around it: a move begins once they are gone
 # and the next still frame brings them back.
@@ -2722,12 +2729,112 @@ class DonutRenderer(Furniture):
         self.note_c = tuple(int(lerp(self.th["muted"][c], self.th["fg"][c], 0.5))
                             for c in range(3))
 
+        self.by_label = {d["label"]: i for i, d in enumerate(items)}
+        self.peel = self._peel(dn.get("peel"))
+        self.stages = self._build_stages()
+
         self._fit()
         self._layout_labels()
         self._place_figure()
-        self._build_cards()
-        self.section_view = {i: self._section_view(i) for i in self.visit}
+        # Everything that depends on a section's angle has to exist once per
+        # stage, because in a peel the angles move: the labels around the ring,
+        # the cards (a share is a share *of* something, and the something
+        # shrinks), and the camera that frames a section with its card.
+        self.stage_labels, self.stage_cards, self.stage_view = [], [], []
+        for si in range(len(self.stages)):
+            self._use_stage(si)
+            self._layout_labels()
+            self._build_cards()
+            self.stage_labels.append(self.labels)
+            self.stage_cards.append(self.cards)
+            self.stage_view.append(
+                {i: self._section_view(i) for i in self.stages[si]["read"]})
+        self._use_stage(0)
+        self.labels = self.stage_labels[0]
+        self.cards = self.stage_cards[0]
+        self.section_view = self.stage_view[0]
         self.timeline = self._timeline()
+
+    # -- stages -------------------------------------------------------------
+    def _peel(self, peel):
+        """the spec's peel steps, checked against the items they name"""
+        if not peel:
+            return []
+        out = []
+        for k, step in enumerate(peel):
+            for key in ("read", "drop"):
+                for lab in step.get(key, []):
+                    if lab not in self.by_label:
+                        raise SystemExit(
+                            f"render.donut.peel[{k}].{key} names {lab!r}, "
+                            f"which is not one of the items")
+            out.append(step)
+        if any(st.get("drop") for st in out[-1:]):
+            raise SystemExit(
+                "the last peel step drops sections and then has nothing to "
+                "show; give the ring that is left a step of its own")
+        return out
+
+    def _build_stages(self):
+        """what the ring is, before and after each drop.
+
+        A stage is the whole of the geometry: which sections are in the ring,
+        what they add up to, and the angles that follow from dividing 360 by
+        that. Nothing is scaled -- the sections are re-normalised, which is
+        the point. A section that was 14% of everything is 34% of what is left
+        once two thirds of the ring has gone, and saying so is the only reason
+        to take anything out.
+        """
+        alive = [i for i in range(len(self.items))]
+        reads = [[self.by_label[l] for l in st.get("read", [])]
+                 for st in self.peel] or [list(self.visit)]
+        stages = []
+
+        def geometry(live, read, title, total_txt):
+            tot = sum(self.items[i]["value"] for i in live)
+            acc, ang, share = self.start, {}, {}
+            for i in live:
+                span = 360.0 * self.items[i]["value"] / tot
+                ang[i] = (acc, acc + span)
+                share[i] = self.items[i]["value"] / tot
+                acc += span
+            return {"alive": list(live), "ang": ang, "share": share,
+                    "total": tot, "read": [i for i in read if i in live],
+                    "title": title, "total_txt": total_txt}
+
+        stages.append(geometry(alive, reads[0], self.lead, self.total_txt))
+        for k, step in enumerate(self.peel):
+            drop = [self.by_label[l] for l in step.get("drop", [])]
+            if not drop:
+                continue
+            alive = [i for i in alive if i not in drop]
+            if not alive:
+                raise SystemExit(
+                    f"render.donut.peel[{k}].drop empties the ring")
+            nxt = reads[k + 1] if k + 1 < len(reads) else []
+            stages.append(geometry(
+                alive, nxt, step.get("title", self.lead),
+                step.get("total", f"{_fmt_value(sum(self.items[i]['value'] for i in alive))} "
+                         f"{self.unit}".strip())))
+        return stages
+
+    def _use_stage(self, si: int) -> None:
+        """put stage `si`'s geometry on the items.
+
+        The angles live on the items rather than in a table the drawing has to
+        be handed, because every method that draws a section already reads them
+        from there -- so a stage change is a write, and nothing downstream has
+        to learn what a stage is.
+        """
+        st = self.stages[si]
+        for i, d in enumerate(self.items):
+            if i in st["ang"]:
+                d["a0"], d["a1"] = st["ang"][i]
+                d["share"] = st["share"][i]
+                d["out"] = 0.0
+            else:
+                d["out"] = 1.0
+        self.total_txt = st["total_txt"]
 
     # -- camera -------------------------------------------------------------
     def _cam_for(self, box, context: float):
@@ -2769,17 +2876,32 @@ class DonutRenderer(Furniture):
         The gap between sections is taken out of the section's own ends rather
         than drawn between them, so what separates two sections is the ground
         -- which is the only separator that stays a separator at every zoom.
+
+        A section's angles are read off the item every time rather than held,
+        because in a peel they move: a section that survives a drop grows into
+        the room the dropped one left, and it does it over a second and a bit
+        rather than between frames.
         """
         d = self.items[i]
+        if d.get("out", 0.0) >= 0.999:
+            return None                     # gone, not merely far away
         a0, a1 = d["a0"], d["a1"]
         g = min(self.gap, (a1 - a0) * 0.45)
         b0, b1 = a0 + g / 2, min(a1 - g / 2, self.start + 360.0 * sweep)
         if b1 <= b0:
             return None
         mid = math.radians((a0 + a1) / 2)
-        off = (math.cos(mid) * pop, math.sin(mid) * pop)
+        # leaving is the same radial slide as a pop, taken much further: one
+        # move, so a section that is on its way out is still the section the
+        # camera was looking at a moment ago
+        reach = pop + EJECT_REACH * ease(d.get("out", 0.0))
+        off = (math.cos(mid) * reach, math.sin(mid) * reach)
         return (self._arc(b0, b1, 1.0, off)
                 + self._arc(b1, b0, self.inner, off))
+
+    def _alpha(self, i: int) -> int:
+        """how solid item i is -- full, unless it is on its way out"""
+        return int(255 * (1.0 - self.items[i].get("out", 0.0)) ** 0.6)
 
     @staticmethod
     def _nearest(rim, x: float, y: float):
@@ -2895,6 +3017,11 @@ class DonutRenderer(Furniture):
         for side in (1, -1):
             rows = []
             for i, d in enumerate(self.items):
+                # a section that is not in this stage's ring has no label in
+                # it either, and its angles are whatever the stage it left
+                # happened to give it
+                if d.get("out", 0.0) >= 0.999:
+                    continue
                 mid = math.radians((d["a0"] + d["a1"]) / 2)
                 if (1 if math.cos(mid) >= 0 else -1) != side:
                     continue
@@ -2934,6 +3061,110 @@ class DonutRenderer(Furniture):
 
     # -- storyboard ---------------------------------------------------------
     def _timeline(self) -> list[dict]:
+        if self.peel:
+            return self._peel_timeline()
+        return self._plain_timeline()
+
+    def _peel_timeline(self) -> list[dict]:
+        """read some sections, throw them out, let the rest grow, repeat.
+
+        The four beats of a drop are separate on purpose. `gather` lights what
+        is about to go while it is still in place, so the reader knows what is
+        being taken; `eject` takes it; `reflow` is the only beat where the
+        remaining angles move, so nothing else competes with the one thing
+        worth watching; and `settle` stands still long enough for the new ring
+        to be read as a ring rather than as the end of a move.
+        """
+        T = self.t
+        segs: list[dict] = []
+        whole = self.cam_whole
+
+        def seg(kind, dur, cam0, cam1, **kw):
+            if dur <= 0:
+                return
+            d = {"kind": kind, "dur": float(dur), "cam0": cam0, "cam1": cam1,
+                 "focus": None, "card": None, "estab": ["", ""],
+                 "sweep0": 1.0, "sweep1": 1.0, "labels": False, "arc": 0.0,
+                 "st": 0, "st1": 0, "out0": 0.0, "out1": 0.0, "drop": ()}
+            d.update(kw)
+            d.setdefault("title", self.stages[d["st1"]]["title"])
+            segs.append(d)
+
+        seg("grow", T["grow"], whole, whole, sweep0=0.0, sweep1=1.0,
+            estab=self.cap_intro)
+        seg("intro", T["intro"], whole, whole, labels=True,
+            estab=self.cap_intro)
+
+        cam = whole
+        for k, step in enumerate(self.peel):
+            for i in self.stages[k]["read"]:
+                to = self.stage_view[k][i][0]
+                seg("move", T["move"], cam, to, focus=[i], st=k, st1=k,
+                    arc=PULLBACK)
+                seg("hold", float(self.items[i].get("hold", T["hold"])),
+                    to, to, focus=[i], card=i, st=k, st1=k)
+                cam = to
+            drop = [self.by_label[l] for l in step.get("drop", [])]
+            if not drop:
+                continue
+            seg("gather", T["gather"], cam, whole, focus=drop, st=k, st1=k,
+                estab=step.get("gather", ["", ""]), arc=PULLBACK / 2)
+            seg("eject", T["eject"], whole, whole, focus=drop, st=k, st1=k,
+                drop=drop, out0=0.0, out1=1.0)
+            # the one beat the angles move, and the only one where the ring is
+            # neither what it was nor what it is about to be
+            seg("reflow", T["reflow"], whole, whole, st=k, st1=k + 1,
+                drop=drop, out0=1.0, out1=1.0)
+            seg("settle", T["settle"], whole, whole, st=k + 1, st1=k + 1,
+                labels=True)
+            cam = whole
+
+        last = len(self.stages) - 1
+        seg("regroup", T["regroup"], cam, whole, st=last, st1=last,
+            arc=PULLBACK / 2)
+        seg("outro", T["outro"], whole, whole, labels=True, st=last, st1=last,
+            estab=self.cap_outro)
+        if not segs:
+            raise SystemExit("every donut timing is zero; nothing to render")
+        return segs
+
+    def _apply(self, seg: dict, p: float) -> None:
+        """put this moment's geometry on the items, and on `self`.
+
+        A reflow interpolates each surviving section's two angles from the
+        stage it was in to the stage it is going to. A section that is leaving
+        keeps the angles it had -- it is off the frame by then, and giving it
+        somewhere to be would only be arithmetic nobody sees.
+        """
+        A, B = self.stages[seg["st"]], self.stages[seg["st1"]]
+        out = lerp(seg["out0"], seg["out1"], p)
+        for i, d in enumerate(self.items):
+            # A section on its way out is asked about first. An eject happens
+            # inside one stage -- nothing else may move while it is being
+            # taken -- so it is still in both stages' geometry, and the test
+            # for a survivor would otherwise answer yes and pin it in place.
+            if i in seg["drop"]:
+                d["a0"], d["a1"] = A["ang"][i]
+                d["out"] = out
+                continue
+            a, b = A["ang"].get(i), B["ang"].get(i)
+            if a and b:
+                d["a0"], d["a1"] = lerp(a[0], b[0], p), lerp(a[1], b[1], p)
+                d["out"] = 0.0
+            elif a:
+                d["a0"], d["a1"] = a
+                d["out"] = out if i in seg["drop"] else 1.0
+            else:
+                d["out"] = 1.0
+        for i, sh in B["share"].items():
+            self.items[i]["share"] = sh
+        self.total_txt = B["total_txt"]
+        self.lead = seg["title"]
+        self.labels = self.stage_labels[seg["st1"]]
+        self.cards = self.stage_cards[seg["st"]]
+        self.section_view = self.stage_view[seg["st"]]
+
+    def _plain_timeline(self) -> list[dict]:
         T = self.t
         segs: list[dict] = []
 
@@ -3012,11 +3243,18 @@ class DonutRenderer(Furniture):
         return self._fonts[px]
 
     def _lit(self, i: int, focus: list) -> float:
-        """1 where the beat is, falling off for everything else"""
+        """1 where the beat is, falling off for everything else.
+
+        A peel can light several sections at once -- the pair that is about to
+        leave -- so the weights no longer sum to one, and the shortfall that
+        lights everything while a beat is still arriving has to be measured
+        against the group rather than against the total.
+        """
         if not focus:
             return 1.0
-        rest = max(0.0, 1.0 - sum(w for _, w in focus))
-        return max(rest, max((w for j, w in focus if j == i), default=0.0))
+        best = max((w for j, w in focus if j == i), default=0.0)
+        rest = max(0.0, 1.0 - max(w for _, w in focus))
+        return max(rest, best)
 
     def _ring(self, cv, cam, sweep: float, focus: list) -> None:
         """the ring, drawn at `DONUT_SS` and brought back down.
@@ -3039,7 +3277,7 @@ class DonutRenderer(Furniture):
             col = tuple(int(lerp(d["color"][c], self.th["bg"][c],
                                  self.dim * (1.0 - lit))) for c in range(3))
             ld.polygon([(ox + x * s * ss, oy + y * s * ss) for x, y in pts],
-                       fill=(*col, 255))
+                       fill=(*col, self._alpha(i)))
         # `reduce` is a box average over exactly `ss` by `ss` pixels, which is
         # what supersampling wants and what a resampling filter only
         # approximates -- and it is several times quicker, which at a frame per
@@ -3072,7 +3310,9 @@ class DonutRenderer(Furniture):
         a, k = int(255 * alpha), self.uk
         cx, cy = self.centre
         for i, item in enumerate(self.items):
-            L = self.labels[i]
+            L = self.labels.get(i)
+            if L is None:
+                continue
             pts = [(cx + L[n][0], cy + L[n][1])
                    for n in ("anchor", "elbow", "stub", "text")]
             d.line(pts, fill=fade_c(item["color"], int(a * 0.75)),
@@ -3210,19 +3450,36 @@ class DonutRenderer(Furniture):
         sweep = lerp(s["sweep0"], s["sweep1"], p)
         cut = self.cut_alpha(s, u, s is self.timeline[-1])
         lab = cut if s["labels"] else 0.0
+        if self.peel:
+            self._apply(s, p)
 
         # The dim follows the camera, so it arrives with the section rather
         # than snapping on ahead of it; on the way out it releases the same way.
+        # A peel lights whole groups -- the two test slices together, on their
+        # way out -- so a beat's focus is a list either way.
+        def lit_of(seg):
+            f = seg["focus"] if seg else None
+            if f is None:
+                return []
+            return list(f) if isinstance(f, (list, tuple)) else [f]
+
+        # A dim releases over the beat after the one that lit it. But a peel's
+        # spotlight falls on sections that are about to *leave*, and once they
+        # have there is nothing for the dim to release from -- carrying it
+        # anyway holds the survivors down through the one beat that is about
+        # them.
+        gone = [i for i, d in enumerate(self.items)
+                if d.get("out", 0.0) >= 0.999]
+        here = [i for i in lit_of(s) if i not in gone]
+        there = [i for i in lit_of(prev) if i not in gone]
         focus = []
-        if s["focus"] is not None:
-            if s["kind"] == "move":
-                if prev and prev["focus"] is not None:
-                    focus.append((prev["focus"], 1.0 - p))
-                focus.append((s["focus"], p))
-            else:
-                focus.append((s["focus"], 1.0))
-        elif prev and prev["focus"] is not None:
-            focus.append((prev["focus"], 1.0 - p))
+        if here and s["kind"] in ("move", "gather"):
+            focus += [(i, 1.0 - p) for i in there]
+            focus += [(i, p) for i in here]
+        elif here:
+            focus += [(i, 1.0) for i in here]
+        elif there:
+            focus += [(i, 1.0 - p) for i in there]
 
         cv = Image.new("RGB", (self.W, self.H), self.th["bg"])
         d = ImageDraw.Draw(cv)
@@ -3234,8 +3491,9 @@ class DonutRenderer(Furniture):
         # camera is still for the whole of that beat. Shown during a travel it
         # would have to be drawn against a camera it was not placed for, and
         # would slide across the frame to catch up.
-        if s["kind"] == "hold":
-            self._card(cv, d, s["focus"], cut)
+        card = s.get("card", s["focus"] if s["kind"] == "hold" else None)
+        if card is not None:
+            self._card(cv, d, card, cut)
 
         # The word along the top takes the colour of whichever section the
         # frame is mostly about, so the swap lands with the section rather than
@@ -3244,6 +3502,7 @@ class DonutRenderer(Furniture):
                   if focus else self.th["after"])
         self.header(d, accent)
         return cv
+
 
 
 # ---------------------------------------------------------------------------
@@ -3383,7 +3642,6 @@ class AnsiDonutRenderer(DonutRenderer):
         super().__init__(spec, outdir)
         self.cols = int(self.W / self.tcw) + 1
         self.rows = int(self.H / self.tch) + 1
-        self._ends = [d["a1"] for d in self.items]
 
     def _font_for(self, cell: int):
         if cell not in self._fonts:
@@ -3521,34 +3779,6 @@ class AnsiDonutRenderer(DonutRenderer):
         return out + ([line] if line else [])
 
     # -- the ring -----------------------------------------------------------
-    def _world(self, cam, px, py):
-        s, cx, cy = cam
-        return (cx + (px - (self.vp[0] + self.vp[2] / 2)) / s,
-                cy + (py - (self.vp[1] + self.vp[3] / 2)) / s)
-
-    def _hit(self, x, y, sweep, offs):
-        """which section covers this world point, or None.
-
-        The angle of the untranslated point picks the candidate: a section's
-        pop is radial and small, so it never carries a point out of its own
-        wedge, and one test then does what six would.
-        """
-        t = self.start + (math.degrees(math.atan2(y, x)) - self.start) % 360.0
-        i = bisect.bisect_right(self._ends, t)
-        if i >= len(self.items):
-            return None
-        d = self.items[i]
-        px, py = x - offs[i][0], y - offs[i][1]
-        r = math.hypot(px, py)
-        if not self.inner <= r <= 1.0:
-            return None
-        tt = self.start + (math.degrees(math.atan2(py, px)) - self.start) % 360.0
-        g = min(self.gap, (d["a1"] - d["a0"]) * 0.45)
-        if tt < d["a0"] + g / 2 or tt > min(d["a1"] - g / 2,
-                                            self.start + 360.0 * sweep):
-            return None
-        return i
-
     def _smooth(self, cam, sweep, focus):
         """the ring drawn the ordinary way, as RGBA over the viewport.
 
@@ -3575,7 +3805,7 @@ class AnsiDonutRenderer(DonutRenderer):
                                         self.dim * (1.0 - lit)))
                         for k in range(3))
             ld.polygon([(ox + x * s * ss, oy + y * s * ss) for x, y in pts],
-                       fill=(*col, 255))
+                       fill=(*col, self._alpha(i)))
         return lay.reduce(ss)
 
     def _lit_mask(self, cam, sweep, focus):
@@ -3786,7 +4016,9 @@ class AnsiDonutRenderer(DonutRenderer):
         grid = {}
         cx, cy = self.centre
         for i, item in enumerate(self.items):
-            L = self.labels[i]
+            L = self.labels.get(i)
+            if L is None:
+                continue
             a = self._cell(cx + L["anchor"][0], cy + L["anchor"][1])
             tc, tr = self._cell(cx + L["text"][0], cy + L["text"][1])
             name, val = item["label"], self._sub_label(item)
@@ -3838,7 +4070,10 @@ class AnsiDonutRenderer(DonutRenderer):
         which is the right way round for a character grid, because a grid that
         moves is a grid that crawls.
         """
-        if seg["kind"] not in ("intro", "hold", "outro"):
+        # `settle` is a still beat like any other -- it is the one where the
+        # new ring is read -- so it comes into focus too. The beats of a drop
+        # that move (gather, eject, reflow) stay coarse.
+        if seg["kind"] not in ("intro", "hold", "outro", "settle"):
             return 0.0
         t, d = u * seg["dur"], seg["dur"]
         i, o = min(self.focus_in, d / 2), min(self.focus_out, d / 2)

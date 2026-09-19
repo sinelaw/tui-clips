@@ -474,6 +474,110 @@ def test_donut_refuses_a_spec_it_cannot_draw(tmp):
         check(True, "a donut spec cannot also name capture.panes")
 
 
+def peel_spec(**over):
+    sp = donut_spec()
+    dn = sp["render"]["donut"]
+    dn["items"] = [
+        {"label": "Tests", "value": 500, "note": "the tests"},
+        {"label": "App", "value": 300, "note": "the app"},
+        {"label": "UI", "value": 150, "note": "the ui"},
+        {"label": "Rest", "value": 50, "note": "the rest"}]
+    dn["total"] = "1000"
+    dn["peel"] = [{"read": ["Tests"], "drop": ["Tests"],
+                   "title": "no tests", "total": "500"},
+                  {"read": ["App", "UI"]}]
+    dn.update(over)
+    sp["render"]["timing"].update({"gather": .2, "eject": .3, "reflow": .3,
+                                   "settle": .3})
+    return sp
+
+
+def test_donut_peel_renormalises_each_stage(tmp):
+    """taking a section out restates every other section.
+
+    Which is the only reason to take one out. `Tests` is half of everything;
+    once it has gone `App` is 60% of what is left rather than 30% of what
+    there was, and the ring is a full circle again.
+    """
+    r = render.make(peel_spec(), {}, os.path.join(tmp, "f"))
+    check(len(r.stages) == 2, f"two stages, got {len(r.stages)}")
+    a, b = r.stages
+    check(a["total"] == 1000 and b["total"] == 500,
+          f'totals are {a["total"]:.0f} then {b["total"]:.0f}')
+    check(len(a["alive"]) == 4 and len(b["alive"]) == 3,
+          "the dropped section is out of the second stage")
+    app = r.by_label["App"]
+    check(abs(a["share"][app] - 0.30) < 1e-9
+          and abs(b["share"][app] - 0.60) < 1e-9,
+          f'App goes {100*a["share"][app]:.0f}% -> {100*b["share"][app]:.0f}%')
+    for st in (a, b):
+        span = sum(st["ang"][i][1] - st["ang"][i][0] for i in st["alive"])
+        check(abs(span - 360.0) < 1e-9,
+              f"stage closes the circle ({span:.4f} degrees)")
+    check(b["title"] == "no tests" and b["total_txt"] == "500",
+          "the stage carries its own header and total")
+
+
+def test_donut_peel_storyboard(tmp):
+    """read, gather, eject, reflow, settle -- and only reflow moves an angle"""
+    r = render.make(peel_spec(), {}, os.path.join(tmp, "f"))
+    kinds = [s["kind"] for s in r.timeline]
+    check(kinds == ["grow", "intro", "move", "hold", "gather", "eject",
+                    "reflow", "settle", "move", "hold", "move", "hold",
+                    "regroup", "outro"], f"storyboard is {kinds}")
+    moved = set()
+    for n in range(int(round(r.total() * r.fps))):
+        s, u, _ = r.at(n / r.fps)
+        before = [(d.get("a0"), d.get("a1")) for d in r.items]
+        r._apply(s, render.ease(u))
+        after = [(d.get("a0"), d.get("a1")) for d in r.items]
+        alive = set(r.stages[s["st1"]]["ang"])
+        if any(x != y for i, (x, y) in enumerate(zip(before, after))
+               if i in alive and before[i][0] is not None):
+            moved.add(s["kind"])
+    check(moved <= {"reflow"},
+          f"only a reflow moves a surviving angle (moved on {sorted(moved)})")
+
+
+def test_donut_peel_ejects_all_the_way_out(tmp):
+    """what leaves is gone, not parked at the edge"""
+    r = render.make(peel_spec(), {}, os.path.join(tmp, "f"))
+    i = r.by_label["Tests"]
+    eject = next(s for s in r.timeline if s["kind"] == "eject")
+    r._apply(eject, 0.0)
+    check(r.items[i].get("out", 0) == 0.0 and r._wedge(i) is not None,
+          "at the start of the eject it is still in the ring")
+    r._apply(eject, 1.0)
+    check(r.items[i]["out"] == 1.0 and r._wedge(i) is None,
+          "by the end it is not drawn at all")
+    r._apply(eject, 0.5)
+    check(0 < r._alpha(i) < 255, f"and fades on the way ({r._alpha(i)})")
+    far = _bbox_of(r._wedge(i))
+    check(far[2] > 1.0 + render.EJECT_REACH * 0.3,
+          f"travelling outward, not in place (reaches {far[2]:.2f})")
+    # a section that has left takes its label with it
+    settle = next(s for s in r.timeline if s["kind"] == "settle")
+    r._apply(settle, 1.0)
+    check(i not in r.labels,
+          "and a stage does not label a section it no longer has")
+
+
+def test_donut_peel_refuses_what_it_cannot_show(tmp):
+    for bad, why in (
+            ({"peel": [{"read": ["Nope"]}]}, "a read that names nothing"),
+            ({"peel": [{"read": ["App"], "drop": ["Ghost"]}]},
+             "a drop that names nothing"),
+            ({"peel": [{"read": ["App"], "drop": ["App"]}]},
+             "a last step that drops and then shows nothing")):
+        sp = peel_spec()
+        sp["render"]["donut"].update(bad)
+        try:
+            render.make(sp, {}, os.path.join(tmp, "f"))
+            check(False, f"{why} was accepted")
+        except SystemExit:
+            check(True, f"{why} is refused")
+
+
 def test_donut_ansi_style_is_selected_by_the_spec(tmp):
     """`style: "ansi"` prints the clip; anything else is refused"""
     sp = donut_spec()

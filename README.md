@@ -977,6 +977,7 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
   "thickness": 0.40,           // the band, as a fraction of the outer radius
   "gap": 1.0,                  // degrees of ground between two sections
   "style": "ansi",             // optional; "smooth" (the default) or "ansi"
+  "peel": [ ... ],             // optional; drop sections stage by stage
   "max_zoom": 7.0,             // a rail on how close a section may be read
   "dim": 0.68,                 // how far the other sections go back
   "items": [
@@ -1056,6 +1057,50 @@ long way apart once you are close to one, and lifting away and settling again
 puts the whole ring back on screen at the midpoint — which is where a reader
 who has lost their place gets it back. A little, because the travel is short:
 a deep arc crossed in half a second is a lurch rather than a lift.
+
+## Peeling a donut
+
+A breakdown is sometimes an argument about what to leave out. `render.donut.peel`
+makes that the clip: read a few sections, throw them out of the ring, let the
+rest grow into the gap, and say what the ring is now. Repeat. See
+[`examples/fresh-source-peel.json`](examples/fresh-source-peel.json), which
+takes fresh's 908k lines down to the 363k that are neither tests nor
+TypeScript.
+
+```jsonc
+"peel": [
+  {"read": ["End-to-end tests", "Inline unit tests"],   // dwell on these ...
+   "drop": ["End-to-end tests", "Inline unit tests"],   // ... then lose them
+   "gather": ["51% tests", ""],        // the caption while they are still lit
+   "title": "code only (no tests)",    // what the ring is once they have gone
+   "total": "445k lines"},             // ... and what it adds up to
+  {"read": ["Plugins (TS)"], "drop": ["Plugins (TS)"],
+   "title": "core only (rust)", "total": "363k lines"},
+  {"read": ["Editor app", "Rendering & UI"]}    // the last ring, read as-is
+]
+```
+
+**Each stage re-normalises, and that is the whole point.** A section that was
+14% of everything is 34% of what is left once two thirds of the ring has gone.
+Nothing is scaled: the survivors are divided into 360° again, so the ring
+closes. If a peel only shrank the ring it would be a subtraction, and there
+would be no reason to animate it.
+
+**Four beats to a drop, and they are separate on purpose.** `gather` lights
+what is about to go while it is still in place, so the reader sees what is
+being taken; `eject` slides it out along its own radius and past the frame,
+fading as it goes; `reflow` is the only beat in the clip where a surviving
+section's angles move, so nothing competes with the one thing worth watching;
+and `settle` stands still long enough for the new ring to read as a ring
+rather than as the end of a move. Timings are `gather`, `eject`, `reflow`,
+`settle`.
+
+A section's angles live on the item and are rewritten every frame, which is
+why none of the drawing had to learn what a stage is — everything that draws a
+section already read them from there. What did need saying once per stage is
+everything derived from an angle: the labels around the ring, the cards (a
+share is a share *of* something, and the something shrinks), and the camera
+that frames a section together with its card.
 
 ## The printed donut
 

@@ -19,6 +19,7 @@ that is deliberately not written in Rust.
 
     python3 examples/fresh-source-survey.py ~/src/fresh
     python3 examples/fresh-source-survey.py ~/src/fresh --spec > out.json
+    python3 examples/fresh-source-survey.py ~/src/fresh --peel > peel.json
 
 The path rules below are fresh's, and they are the only part of this that does
 not generalise: a concern is a judgement about what belongs with what, and
@@ -43,10 +44,15 @@ MOD_OPEN = re.compile(r"\bmod\s+\w+\s*\{")
 
 # Path rules, first match wins, so the specific comes before the general.
 RULES = [
-    ("Plugins & JS", (
+    # The two halves of the plugin story, kept apart because the clip takes
+    # one of them out and leaves the other: the runtime is Rust and is part of
+    # the editor, the plugins are TypeScript and are not.
+    ("Plugins (TS)", (
+        "crates/fresh-editor/plugins/", "crates/fresh-editor/npm-package/",
+        "crates/fresh-editor/web-ui/")),
+    ("Plugin runtime", (
         "crates/fresh-plugin-runtime/", "crates/fresh-plugin-api-macros/",
-        "crates/fresh-parser-js/", "crates/fresh-editor/plugins/",
-        "crates/fresh-editor/npm-package/",
+        "crates/fresh-parser-js/",
         "crates/fresh-editor/src/services/plugins/",
         "crates/fresh-core/src/plugin_schemas.rs",
         "crates/fresh-editor/src/plugin_schemas.rs")),
@@ -79,7 +85,6 @@ RULES = [
         "crates/fresh-editor-core/src/partial_config.rs",
         "crates/fresh-editor/src/server/", "crates/fresh-editor/src/client/",
         "crates/fresh-editor/src/webui/", "crates/fresh-editor/src/wasm/",
-        "crates/fresh-editor/web-ui/",
         "crates/fresh-editor/src/services/")),
     ("Text model", (
         "crates/fresh-editor-core/src/model/",
@@ -105,8 +110,10 @@ NOTES = {
         "commands, dispatch, buffers — what the editor does when asked",
     "Rendering & UI":
         "the view tree, the terminal backend, and every widget on it",
-    "Plugins & JS":
-        "a JS engine, its host API, and the plugins written against it",
+    "Plugins (TS)":
+        "the plugin layer in TypeScript, and the browser UI with it",
+    "Plugin runtime":
+        "the JS engine, the host API, and the macros that bind them",
     "Services & IPC":
         "the parts that talk outside the process: files, daemon, config",
     "Text model":
@@ -252,9 +259,93 @@ def spec(loc, total):
     }, indent=2, ensure_ascii=False)
 
 
+TESTS = ["End-to-end tests", "Inline unit tests"]
+NOT_RUST = "Plugins (TS)"
+
+
+def peel_spec(loc, total):
+    """the same numbers, told as three rings instead of one.
+
+    Each stage re-normalises: a section that was 14% of everything is 34% of
+    what is left once the tests have gone. That restatement is the only reason
+    to take anything out of a ring, and it is the reason the totals are given
+    per stage rather than scaled.
+    """
+    s2 = total - sum(loc[k] for k in TESTS)
+    s3 = s2 - loc[NOT_RUST]
+    items = []
+    for i, (k, v) in enumerate(sorted(loc.items(), key=lambda kv: -kv[1])):
+        items.append({"label": k, "value": v, "display": short(v),
+                      "note": NOTES[k], "color": PALETTE[i % len(PALETTE)]})
+    core = [k for k, _ in sorted(loc.items(), key=lambda kv: -kv[1])
+            if k not in TESTS and k != NOT_RUST][:4]
+    return json.dumps({
+        "name": "fresh-source-peel",
+        "render": {
+            "size": [1080, 1080], "fps": 60,
+            "title": "fresh 0.5.1 — source by concern",
+            # The only two captions in the clip, and both of them live before
+            # a stage header exists. Once the header says what ring this is,
+            # a caption saying it again is a second place to read the same
+            # thing.
+            "intro_caption": ["code + tests", ""],
+            "outro_caption": ["", ""],
+            "labels": {"donut": "all code"},
+            "timing": {"hold": 2.6},
+            "donut": {
+                "style": "ansi", "charset": "unicode",
+                "unit": "lines", "total": f"{short(total)} lines",
+                "total_label": "of source", "thickness": 0.40,
+                "items": items,
+                "peel": [
+                    {"read": TESTS, "drop": TESTS,
+                     "gather": [f"{round(100 * (total - s2) / total)}% tests", ""],
+                     "title": "code only (no tests)",
+                     "total": f"{short(s2)} lines"},
+                    {"read": [NOT_RUST], "drop": [NOT_RUST],
+                     "title": "core only (rust)",
+                     "total": f"{short(s3)} lines"},
+                    {"read": core},
+                ],
+            },
+        },
+        "encode": {"crf": 18, "preset": "slow"},
+    }, indent=2, ensure_ascii=False)
+
+
+def check_pure_rust():
+    """the clip's last header says "core only (rust)"; make it earn that.
+
+    Everything that is not Rust has to be inside the one section the peel
+    throws out, or the claim is decoration.
+    """
+    stray = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR]
+        for fn in filenames:
+            if not fn.endswith((".ts", ".tsx", ".js", ".jsx")):
+                continue
+            if fn.endswith(SKIP_FILE):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), ROOT).replace(
+                os.sep, "/")
+            if "tests" in rel.split("/") or concern(rel) == NOT_RUST:
+                continue
+            stray.append(rel)
+    return stray
+
+
 def main():
     loc, files, rest = survey()
     total = sum(loc.values())
+    if "--peel" in sys.argv:
+        stray = check_pure_rust()
+        if stray:
+            raise SystemExit(
+                f"{len(stray)} non-Rust files would survive the peel, so "
+                f'"core only (rust)" would be a lie: {stray[:5]}')
+        print(peel_spec(loc, total))
+        return
     if "--spec" in sys.argv:
         print(spec(loc, total))
         return
