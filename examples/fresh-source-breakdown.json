@@ -1,0 +1,158 @@
+{
+  "name": "fresh-source-breakdown",
+  "render": {
+    "size": [
+      1080,
+      1080
+    ],
+    "fps": 60,
+    "title": "fresh 0.5.1 — source by concern",
+    "intro_caption": [
+      "908k lines of fresh",
+      "every crate, Rust and TypeScript alike"
+    ],
+    "outro_caption": [
+      "51% of it is tests",
+      "339k end-to-end, 0.0k in the files they test"
+    ],
+    "timing": {
+      "hold": 2.8
+    },
+    "donut": {
+      "style": "ansi",
+      "charset": "unicode",
+      "unit": "lines",
+      "total": "908k lines",
+      "total_label": "of source",
+      "thickness": 0.4,
+      "items": [
+        {
+          "label": "End-to-end tests",
+          "value": 338505,
+          "display": "339k",
+          "note": "integration crates that drive the whole editor from outside it",
+          "color": [
+            74,
+            222,
+            128
+          ]
+        },
+        {
+          "label": "Inline unit tests",
+          "value": 124508,
+          "display": "125k",
+          "note": "#[cfg(test)] blocks, living in the file they are testing",
+          "color": [
+            56,
+            189,
+            248
+          ]
+        },
+        {
+          "label": "Editor app",
+          "value": 124487,
+          "display": "124k",
+          "note": "commands, dispatch, buffers — what the editor does when asked",
+          "color": [
+            251,
+            191,
+            36
+          ]
+        },
+        {
+          "label": "Rendering & UI",
+          "value": 100139,
+          "display": "100k",
+          "note": "the view tree, the terminal backend, and every widget on it",
+          "color": [
+            167,
+            139,
+            250
+          ]
+        },
+        {
+          "label": "Plugins & JS",
+          "value": 95323,
+          "display": "95k",
+          "note": "a JS engine, its host API, and the plugins written against it",
+          "color": [
+            244,
+            114,
+            182
+          ]
+        },
+        {
+          "label": "Services & IPC",
+          "value": 41405,
+          "display": "41k",
+          "note": "the parts that talk outside the process: files, daemon, config",
+          "color": [
+            45,
+            212,
+            191
+          ]
+        },
+        {
+          "label": "Text model",
+          "value": 28070,
+          "display": "28k",
+          "note": "ropes, wrapping, and the primitives every edit goes through",
+          "color": [
+            248,
+            113,
+            113
+          ]
+        },
+        {
+          "label": "Everything else",
+          "value": 20158,
+          "display": "20k",
+          "note": "entry points, the updater, localisation, odds and ends",
+          "color": [
+            148,
+            163,
+            184
+          ],
+          "visit": false
+        },
+        {
+          "label": "Input & keys",
+          "value": 17463,
+          "display": "17k",
+          "note": "keys in, actions out, and the router that decides between them",
+          "color": [
+            249,
+            146,
+            58
+          ]
+        },
+        {
+          "label": "Language servers",
+          "value": 9108,
+          "display": "9.1k",
+          "note": "LSP clients and completion, talking to other people's tools",
+          "color": [
+            132,
+            204,
+            22
+          ]
+        },
+        {
+          "label": "Syntax & themes",
+          "value": 8987,
+          "display": "9.0k",
+          "note": "grammars, highlighting, and the colours they get mapped onto",
+          "color": [
+            217,
+            70,
+            239
+          ]
+        }
+      ]
+    }
+  },
+  "encode": {
+    "crf": 18,
+    "preset": "slow"
+  }
+}
