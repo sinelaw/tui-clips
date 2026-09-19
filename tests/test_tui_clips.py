@@ -552,9 +552,14 @@ def test_donut_peel_ejects_all_the_way_out(tmp):
           "by the end it is not drawn at all")
     r._apply(eject, 0.5)
     check(0 < r._alpha(i) < 255, f"and fades on the way ({r._alpha(i)})")
-    far = _bbox_of(r._wedge(i))
-    check(far[2] > 1.0 + render.EJECT_REACH * 0.3,
-          f"travelling outward, not in place (reaches {far[2]:.2f})")
+    half = _bbox_of(r._wedge(i))[2]
+    check(half > 1.0, f"travelling outward, not in place (reaches {half:.2f})")
+    # A throw accelerates. Half way through the beat it is nowhere near half
+    # way out, and easing `out` a second time in `_wedge` -- which is what it
+    # used to do -- made it slow down as it left instead.
+    check(half - 1.0 < render.EJECT_REACH * 0.5,
+          f"and is still gathering speed at the midpoint "
+          f"({(half - 1.0) / render.EJECT_REACH:.0%} of the way out)")
     # a section that has left takes its label with it
     settle = next(s for s in r.timeline if s["kind"] == "settle")
     r._apply(settle, 1.0)

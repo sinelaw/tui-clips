@@ -2489,11 +2489,13 @@ class ExplodeRenderer(Furniture):
 # ---------------------------------------------------------------------------
 
 DEFAULT_DONUT_TIMING = {
-    "grow": 1.2, "intro": 2.2, "move": 0.55, "hold": 3.0,
-    "regroup": 0.6, "outro": 2.0,
-    # a peel's four extra beats: light what is leaving, throw it out, let the
-    # rest grow into the gap, and stand still long enough to be read again
-    "gather": 0.7, "eject": 1.1, "reflow": 1.3, "settle": 2.2,
+    "grow": 1.2, "intro": 2.2, "move": 0.45, "hold": 3.0,
+    "regroup": 0.5, "outro": 2.0,
+    # A peel's four extra beats: light what is leaving, throw it out, let the
+    # rest grow into the gap, and stand still long enough to be read again.
+    # Only the last of those is for reading, and it is the only one that is
+    # not short -- a transition the eye has already understood is a wait.
+    "gather": 0.45, "eject": 0.6, "reflow": 0.8, "settle": 2.2,
 }
 
 # How far out of the ring an ejected section travels, in ring radii. Far
@@ -2891,10 +2893,12 @@ class DonutRenderer(Furniture):
         if b1 <= b0:
             return None
         mid = math.radians((a0 + a1) / 2)
-        # leaving is the same radial slide as a pop, taken much further: one
-        # move, so a section that is on its way out is still the section the
-        # camera was looking at a moment ago
-        reach = pop + EJECT_REACH * ease(d.get("out", 0.0))
+        # Leaving is the same radial slide as a pop, taken much further: one
+        # move, so a section on its way out is still the section the camera
+        # was looking at a moment ago. No easing here -- `out` arrives already
+        # shaped, and easing it twice made a throw that slowed down as it left,
+        # which is the one thing a throw does not do.
+        reach = pop + EJECT_REACH * d.get("out", 0.0)
         off = (math.cos(mid) * reach, math.sin(mid) * reach)
         return (self._arc(b0, b1, 1.0, off)
                 + self._arc(b1, b0, self.inner, off))
@@ -3128,7 +3132,7 @@ class DonutRenderer(Furniture):
             raise SystemExit("every donut timing is zero; nothing to render")
         return segs
 
-    def _apply(self, seg: dict, p: float) -> None:
+    def _apply(self, seg: dict, p: float, u: float = None) -> None:
         """put this moment's geometry on the items, and on `self`.
 
         A reflow interpolates each surviving section's two angles from the
@@ -3137,7 +3141,11 @@ class DonutRenderer(Furniture):
         somewhere to be would only be arithmetic nobody sees.
         """
         A, B = self.stages[seg["st"]], self.stages[seg["st1"]]
-        out = lerp(seg["out0"], seg["out1"], p)
+        # Angles ease in and out, because a reflow starts and ends at rest.
+        # A section being thrown does neither: it takes the raw clock squared,
+        # so it is still accelerating at the moment it leaves the frame.
+        out = lerp(seg["out0"], seg["out1"],
+                   (p if u is None else u) ** 2)
         for i, d in enumerate(self.items):
             # A section on its way out is asked about first. An eject happens
             # inside one stage -- nothing else may move while it is being
@@ -3451,7 +3459,7 @@ class DonutRenderer(Furniture):
         cut = self.cut_alpha(s, u, s is self.timeline[-1])
         lab = cut if s["labels"] else 0.0
         if self.peel:
-            self._apply(s, p)
+            self._apply(s, p, u)
 
         # The dim follows the camera, so it arrives with the section rather
         # than snapping on ahead of it; on the way out it releases the same way.
