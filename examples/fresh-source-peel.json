@@ -28,6 +28,7 @@
       "total": "822K",
       "total_label": "LoC",
       "thickness": 0.4,
+      "card": "full",
       "items": [
         {
           "label": "End-to-end tests",

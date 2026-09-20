@@ -269,9 +269,14 @@ def cloc(tmp, buckets):
     too and are dropped on the floor: cloc counts them apart from code for the
     same reason this does not want them.
     """
-    out = subprocess.run(
-        ["cloc", "--by-file", "--csv", "--quiet", "--follow-links", tmp],
-        capture_output=True, text=True, check=True).stdout
+    try:
+        out = subprocess.run(
+            ["cloc", "--by-file", "--csv", "--quiet", "--follow-links", tmp],
+            capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        raise SystemExit(
+            "this needs cloc on the path: `apt install cloc`, `brew install "
+            "cloc`, or https://github.com/AlDanial/cloc")
     rows = csv.DictReader(io.StringIO(
         "\n".join(l for l in out.splitlines() if l.strip())))
     seen = []

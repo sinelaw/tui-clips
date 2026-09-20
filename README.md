@@ -1113,6 +1113,30 @@ everything derived from an angle: the labels around the ring, the cards (a
 share is a share *of* something, and the something shrinks), and the camera
 that frames a section together with its card.
 
+### Where the fresh numbers come from
+
+The three `fresh-source-*.json` specs are generated, not written:
+[`examples/fresh-source-survey.py`](examples/fresh-source-survey.py) counts a
+checkout of [fresh](https://github.com/sinelaw/fresh) and prints the whole
+spec, so the picture cannot drift from the count.
+
+```sh
+python3 examples/fresh-source-survey.py ~/src/fresh                 # the table
+python3 examples/fresh-source-survey.py ~/src/fresh --spec  > examples/fresh-source-breakdown.json
+python3 examples/fresh-source-survey.py ~/src/fresh --peel  > examples/fresh-source-peel.json
+python3 examples/fresh-source-survey.py ~/src/fresh --peel --big > examples/fresh-source-peel-big.json
+```
+
+It needs `cloc` on the path. What it does that `cloc` alone cannot: every
+`#[cfg(test)]` block is cut out of its file and counted as a test rather than
+as the subsystem it sits in, and the two halves are written to a scratch tree
+that `cloc` is then run over — which is where the comment counts come from, so
+comments can leave the ring with the tests. Everything else is bucketed by
+path, and those path rules are fresh's own: a concern is a judgement about
+what belongs with what, and nothing can read that off a directory tree. The
+`--peel` run also refuses to print a spec whose last stage says *core only
+(rust)* while some TypeScript would survive the peel.
+
 ## The printed donut
 
 This repo is about terminals, and a donut drawn with polygons is the one shape
