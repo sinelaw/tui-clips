@@ -8,7 +8,7 @@
     "fps": 60,
     "title": "fresh 0.5.1 — source by concern",
     "intro_caption": [
-      "code + tests",
+      "code + tests + comments",
       ""
     ],
     "outro_caption": [
@@ -16,7 +16,7 @@
       ""
     ],
     "labels": {
-      "donut": "all code"
+      "donut": "everything"
     },
     "timing": {
       "hold": 2.6
@@ -24,15 +24,15 @@
     "donut": {
       "style": "ansi",
       "charset": "unicode",
-      "unit": "lines",
-      "total": "908k lines",
-      "total_label": "of source",
+      "unit": "LoC",
+      "total": "822K",
+      "total_label": "LoC",
       "thickness": 0.4,
       "items": [
         {
           "label": "End-to-end tests",
-          "value": 338505,
-          "display": "339k",
+          "value": 233348,
+          "display": "233K",
           "note": "integration crates that drive the whole editor from outside it",
           "color": [
             74,
@@ -41,10 +41,10 @@
           ]
         },
         {
-          "label": "Inline unit tests",
-          "value": 124508,
-          "display": "125k",
-          "note": "#[cfg(test)] blocks, living in the file they are testing",
+          "label": "Comments",
+          "value": 203727,
+          "display": "204K",
+          "note": "every comment line in the repo, tests and code alike",
           "color": [
             56,
             189,
@@ -52,10 +52,10 @@
           ]
         },
         {
-          "label": "Editor app",
-          "value": 124487,
-          "display": "124k",
-          "note": "commands, dispatch, buffers — what the editor does when asked",
+          "label": "Inline unit tests",
+          "value": 96738,
+          "display": "97K",
+          "note": "#[cfg(test)] blocks, living in the file they are testing",
           "color": [
             251,
             191,
@@ -63,10 +63,10 @@
           ]
         },
         {
-          "label": "Rendering & UI",
-          "value": 100139,
-          "display": "100k",
-          "note": "the view tree, the terminal backend, and every widget on it",
+          "label": "Editor app",
+          "value": 83449,
+          "display": "83K",
+          "note": "commands, dispatch, buffers — what the editor does when asked",
           "color": [
             167,
             139,
@@ -74,10 +74,10 @@
           ]
         },
         {
-          "label": "Plugins (TS)",
-          "value": 81856,
-          "display": "82k",
-          "note": "the plugin layer in TypeScript, and the browser UI with it",
+          "label": "Rendering & UI",
+          "value": 65143,
+          "display": "65K",
+          "note": "the view tree, the terminal backend, and every widget on it",
           "color": [
             244,
             114,
@@ -85,10 +85,10 @@
           ]
         },
         {
-          "label": "Services & IPC",
-          "value": 37745,
-          "display": "38k",
-          "note": "the parts that talk outside the process: files, daemon, config",
+          "label": "Plugins (TS)",
+          "value": 52898,
+          "display": "53K",
+          "note": "the plugin layer in TypeScript, and the browser UI with it",
           "color": [
             45,
             212,
@@ -96,10 +96,10 @@
           ]
         },
         {
-          "label": "Text model",
-          "value": 28070,
-          "display": "28k",
-          "note": "ropes, wrapping, and the primitives every edit goes through",
+          "label": "Services & IPC",
+          "value": 18665,
+          "display": "19K",
+          "note": "the parts that talk outside the process: files, daemon, config",
           "color": [
             248,
             113,
@@ -107,10 +107,10 @@
           ]
         },
         {
-          "label": "Everything else",
-          "value": 20158,
-          "display": "20k",
-          "note": "entry points, the updater, localisation, odds and ends",
+          "label": "Text model",
+          "value": 18428,
+          "display": "18K",
+          "note": "ropes, wrapping, and the primitives every edit goes through",
           "color": [
             148,
             163,
@@ -118,10 +118,10 @@
           ]
         },
         {
-          "label": "Input & keys",
-          "value": 17463,
-          "display": "17k",
-          "note": "keys in, actions out, and the router that decides between them",
+          "label": "Everything else",
+          "value": 12861,
+          "display": "13K",
+          "note": "entry points, the updater, localisation, odds and ends",
           "color": [
             249,
             146,
@@ -129,10 +129,10 @@
           ]
         },
         {
-          "label": "Plugin runtime",
-          "value": 17127,
-          "display": "17k",
-          "note": "the JS engine, the host API, and the macros that bind them",
+          "label": "Input & keys",
+          "value": 12499,
+          "display": "12K",
+          "note": "keys in, actions out, and the router that decides between them",
           "color": [
             132,
             204,
@@ -140,10 +140,10 @@
           ]
         },
         {
-          "label": "Language servers",
-          "value": 9108,
-          "display": "9.1k",
-          "note": "LSP clients and completion, talking to other people's tools",
+          "label": "Plugin runtime",
+          "value": 11811,
+          "display": "12K",
+          "note": "the JS engine, the host API, and the macros that bind them",
           "color": [
             217,
             70,
@@ -151,14 +151,25 @@
           ]
         },
         {
-          "label": "Syntax & themes",
-          "value": 8987,
-          "display": "9.0k",
-          "note": "grammars, highlighting, and the colours they get mapped onto",
+          "label": "Language servers",
+          "value": 6547,
+          "display": "6.5K",
+          "note": "LSP clients and completion, talking to other people's tools",
           "color": [
             74,
             222,
             128
+          ]
+        },
+        {
+          "label": "Syntax & themes",
+          "value": 6305,
+          "display": "6.3K",
+          "note": "grammars, highlighting, and the colours they get mapped onto",
+          "color": [
+            56,
+            189,
+            248
           ]
         }
       ],
@@ -166,18 +177,20 @@
         {
           "read": [
             "End-to-end tests",
+            "Comments",
             "Inline unit tests"
           ],
           "drop": [
             "End-to-end tests",
+            "Comments",
             "Inline unit tests"
           ],
           "gather": [
-            "51% tests",
+            "65% tests + comments",
             ""
           ],
-          "title": "code only (no tests)",
-          "total": "445k lines"
+          "title": "code only",
+          "total": "289K"
         },
         {
           "read": [
@@ -187,7 +200,7 @@
             "Plugins (TS)"
           ],
           "title": "core only (rust)",
-          "total": "363k lines"
+          "total": "236K"
         },
         {
           "read": [
