@@ -430,6 +430,62 @@ def test_donut_card_carries_the_description(tmp):
           "the card is drawn differently for a section that has a note")
 
 
+def test_donut_big_card_says_two_things(tmp):
+    """`card: "big"` is a name and a quantity, in type twice the size.
+
+    The share line and the description are not shortened for it, they are
+    gone: the point of the variant is a card read at a glance, and a glance
+    does not reach a fourth line.
+    """
+    for style in ("smooth", "ansi"):
+        dn = {"card": "big"}
+        if style == "ansi":
+            dn["style"] = "ansi"
+        r = render.make(donut_spec(donut=dict(dn)), {},
+                        os.path.join(tmp, f"b{style}"))
+        check(r._card_value(r.items[0]) == "148 MB",
+              f"{style}: the big card's value carries its unit")
+        r.items[0]["display"] = "148 MB"
+        check(r._card_value(r.items[0]) == "148 MB",
+              f"{style}: and does not say it twice")
+        r.items[0]["display"] = "148"
+
+        full = render.make(donut_spec(donut={k: v for k, v in dn.items()
+                                            if k != "card"}), {},
+                           os.path.join(tmp, f"f{style}"))
+        if style == "ansi":
+            card = r.cards[0]
+            check(card["title"] == "",
+                  "ansi: the title leaves the top rule for the box")
+            check([t for t, _ in card["body"]] == [""] * 5,
+                  "ansi: and nothing at all is set in small type")
+            check([(dr, txt) for dr, txt, _ in card["dh"]]
+                  == [(1, "Trees"), (4, "148 MB")],
+                  "ansi: two double-height lines, name then quantity")
+            check(len(full.cards[0]["dh"]) == 1,
+                  "ansi: where a full card has one")
+        check(r.cards[0]["h"] < full.cards[0]["h"],
+              f"{style}: a big card is shorter than a full one")
+        check(r.cards[0]["img" if style == "smooth" else "cols"]
+              is not None, f"{style}: and it is built")
+
+        # the note is not merely small on a big card -- it is not there
+        sp = donut_spec(donut=dict(dn))
+        sp["render"]["donut"]["items"][0]["note"] = "a" * 60
+        r2 = render.make(sp, {}, os.path.join(tmp, f"n{style}"))
+        mid = int((r.t["grow"] + r.t["intro"] + r.t["move"] + r.t["hold"] / 2)
+                  * r.fps)
+        check(ImageChops.difference(r.frame(mid),
+                                    r2.frame(mid)).getbbox() is None,
+              f"{style}: a note changes nothing about a big card")
+    try:
+        render.make(donut_spec(donut={"card": "huge"}), {},
+                    os.path.join(tmp, "bad"))
+        check(False, "an unknown card style was accepted")
+    except SystemExit:
+        check(True, "an unknown card style is refused")
+
+
 def test_donut_renders_every_beat(tmp):
     """every frame of the storyboard draws, and none of them is empty"""
     r = render.make(donut_spec(), {}, os.path.join(tmp, "f"))

@@ -977,6 +977,7 @@ picture is the numbers. `render.donut.items` is the whole of it: a `label`, a
   "thickness": 0.40,           // the band, as a fraction of the outer radius
   "gap": 1.0,                  // degrees of ground between two sections
   "style": "ansi",             // optional; "smooth" (the default) or "ansi"
+  "card": "full",              // "full" (the default) or "big"
   "peel": [ ... ],             // optional; drop sections stage by stage
   "max_zoom": 7.0,             // a rail on how close a section may be read
   "dim": 0.68,                 // how far the other sections go back
@@ -1013,6 +1014,14 @@ So an item's whole annotation — name, value, share, and the `note` that says
 what the thing *is* — is on the card beside its section. The only words that
 go under the ring are `intro_caption` and `outro_caption`, centred directly
 beneath it, and they are only up while the camera is still.
+
+`"card": "big"` says two of those things instead of four, in type twice the
+size: the name, and the number with its unit — `233K LoC`, not `233K`, since
+the share line that would have carried the unit is gone. The share and the
+`note` are not shortened for it, they are not drawn at all. It is the card
+for a clip that is watched rather than paused on, where a fourth line is a
+line nobody reaches before the camera moves; the `note` still belongs in the
+spec, because `"card": "full"` is the same clip with it back.
 
 **The card decides the framing, not the other way round.** A section and its
 card are one object: the card is dealt out along the radius, so it is always
@@ -1064,18 +1073,20 @@ A breakdown is sometimes an argument about what to leave out. `render.donut.peel
 makes that the clip: read a few sections, throw them out of the ring, let the
 rest grow into the gap, and say what the ring is now. Repeat. See
 [`examples/fresh-source-peel.json`](examples/fresh-source-peel.json), which
-takes fresh's 908k lines down to the 363k that are neither tests nor
+takes fresh's 822K lines down to the 236K that are neither tests, comments nor
 TypeScript.
+[`examples/fresh-source-peel-big.json`](examples/fresh-source-peel-big.json)
+is the same clip with `"card": "big"`.
 
 ```jsonc
 "peel": [
-  {"read": ["End-to-end tests", "Inline unit tests"],   // dwell on these ...
-   "drop": ["End-to-end tests", "Inline unit tests"],   // ... then lose them
-   "gather": ["51% tests", ""],        // the caption while they are still lit
-   "title": "code only (no tests)",    // what the ring is once they have gone
-   "total": "445k lines"},             // ... and what it adds up to
+  {"read": ["End-to-end tests", "Comments", "Inline unit tests"],  // dwell ...
+   "drop": ["End-to-end tests", "Comments", "Inline unit tests"],  // ... go
+   "gather": ["65% tests + comments", ""],   // the caption while they are lit
+   "title": "code only",              // what the ring is once they have gone
+   "total": "289K"},                  // ... and what it adds up to
   {"read": ["Plugins (TS)"], "drop": ["Plugins (TS)"],
-   "title": "core only (rust)", "total": "363k lines"},
+   "title": "core only (rust)", "total": "236K"},
   {"read": ["Editor app", "Rendering & UI"]}    // the last ring, read as-is
 ]
 ```

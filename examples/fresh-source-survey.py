@@ -27,6 +27,7 @@ that is deliberately not written in Rust.
     python3 examples/fresh-source-survey.py ~/src/fresh
     python3 examples/fresh-source-survey.py ~/src/fresh --spec > out.json
     python3 examples/fresh-source-survey.py ~/src/fresh --peel > peel.json
+    python3 examples/fresh-source-survey.py ~/src/fresh --peel --big > big.json
 
 The path rules below are fresh's, and they are the only part of this that does
 not generalise: a concern is a judgement about what belongs with what, and
@@ -336,7 +337,7 @@ TESTS = [E2E, COMMENTS, UNIT]
 NOT_RUST = "Plugins (TS)"
 
 
-def peel_spec(loc, total):
+def peel_spec(loc, total, card="full"):
     """the same numbers, told as three rings instead of one.
 
     Each stage re-normalises: a section that was 14% of everything is 34% of
@@ -353,7 +354,7 @@ def peel_spec(loc, total):
     core = [k for k, _ in sorted(loc.items(), key=lambda kv: -kv[1])
             if k not in TESTS and k != NOT_RUST][:4]
     return json.dumps({
-        "name": "fresh-source-peel",
+        "name": "fresh-source-peel" + ("-big" if card == "big" else ""),
         "render": {
             "size": [1080, 1080], "fps": 60,
             "title": "fresh 0.5.1 — source by concern",
@@ -369,6 +370,7 @@ def peel_spec(loc, total):
                 "style": "ansi", "charset": "unicode",
                 "unit": "LoC", "total": short(total),
                 "total_label": "LoC", "thickness": 0.40,
+                "card": card,
                 "items": items,
                 "peel": [
                     {"read": TESTS, "drop": TESTS,
@@ -418,7 +420,8 @@ def main():
             raise SystemExit(
                 f"{len(stray)} non-Rust files would survive the peel, so "
                 f'"core only (rust)" would be a lie: {stray[:5]}')
-        print(peel_spec(loc, total))
+        print(peel_spec(loc, total,
+                        "big" if "--big" in sys.argv else "full"))
         return
     if "--spec" in sys.argv:
         print(spec(loc, total))

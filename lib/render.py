@@ -2669,6 +2669,15 @@ class DonutRenderer(Furniture):
         self.gap = float(dn.get("gap", 1.0))
         self.max_zoom = float(dn.get("max_zoom", MAX_ZOOM))
         self.dim = float(dn.get("dim", DONUT_DIM))
+        # "full" says everything about a section: name, number, share and the
+        # line that says what it is. "big" says two things in type twice the
+        # size -- the name and the number -- for a clip that is read at a
+        # glance rather than paused on.
+        self.card_style = dn.get("card", "full")
+        if self.card_style not in ("full", "big"):
+            raise SystemExit(
+                'render.donut.card is "full" or "big"; got '
+                f"{self.card_style!r}")
 
         items = [dict(d) for d in dn.get("items", [])]
         if not items:
@@ -2725,6 +2734,8 @@ class DonutRenderer(Furniture):
         self.f_big = ImageFont.truetype(BOLD, int(52 * k))
         self.f_pct = ImageFont.truetype(MONO, int(24 * k))
         self.f_note = ImageFont.truetype(MONO, int(29 * k))
+        self.f_card_big = ImageFont.truetype(BOLD, int(48 * k))
+        self.f_val_big = ImageFont.truetype(BOLD, int(82 * k))
         self._fonts: dict = {}
         # a description is the point of the card, so it is set between the
         # muted grey of a measurement and the full white of a headline
@@ -3363,6 +3374,18 @@ class DonutRenderer(Furniture):
                 line = trial
         return out + ([line] if line else [])
 
+    def _card_value(self, item) -> str:
+        """the number as the big card says it: with its unit.
+
+        A full card can leave the unit to the share line under it and to the
+        hole in the middle of the ring. A card that says two things has no
+        room to spend one of them on a number that is not a quantity.
+        """
+        v = item["display"]
+        if self.unit and not v.endswith(self.unit):
+            v = f"{v} {self.unit}"
+        return v
+
     def _build_cards(self) -> None:
         """each section's whole annotation, drawn once.
 
@@ -3380,14 +3403,20 @@ class DonutRenderer(Furniture):
         pad = int(26 * k)
         self.cards: dict[int, dict] = {}
         for i, item in enumerate(self.items):
-            lines = [(item["label"], self.f_card, self.th["fg"], 0),
-                     (item["display"], self.f_big, item["color"], int(13 * k)),
-                     (f'{_fmt_share(item["share"])} of {self.total_txt}',
-                      self.f_pct, self.th["muted"], int(10 * k))]
-            for j, ln in enumerate(self._wrap(item["note"], self.f_note,
-                                              CARD_TEXT * k)):
-                lines.append((ln, self.f_note, self.note_c,
-                              int((24 if j == 0 else 9) * k)))
+            if self.card_style == "big":
+                lines = [(item["label"], self.f_card_big, self.th["fg"], 0),
+                         (self._card_value(item), self.f_val_big,
+                          item["color"], int(18 * k))]
+            else:
+                lines = [(item["label"], self.f_card, self.th["fg"], 0),
+                         (item["display"], self.f_big, item["color"],
+                          int(13 * k)),
+                         (f'{_fmt_share(item["share"])} of {self.total_txt}',
+                          self.f_pct, self.th["muted"], int(10 * k))]
+                for j, ln in enumerate(self._wrap(item["note"], self.f_note,
+                                                  CARD_TEXT * k)):
+                    lines.append((ln, self.f_note, self.note_c,
+                                  int((24 if j == 0 else 9) * k)))
             # Sized on the ink, not on the font: a card set from the ascent of
             # four faces has a band of nothing under every line, and five lines
             # of nothing is how a readout becomes a poster.
@@ -3946,16 +3975,33 @@ class AnsiDonutRenderer(DonutRenderer):
     def _build_cards(self) -> None:
         self.cards: dict[int, dict] = {}
         for i, item in enumerate(self.items):
-            share = f'{_fmt_share(item["share"])} of {self.total_txt}'
-            note = self._wrap_cols(item["note"], ANSI_NOTE_COLS)
-            body = [("", None),                     # air under the title rule
-                    ("", None), ("", None),         # the double-height value
-                    (share, self.th["muted"]), ("", None)]
-            body += [(ln, self.note_c) for ln in note] + [("", None)]
-            inner = max([len(item["label"]) + 6, len(item["display"]) * 2 + 4]
-                        + [len(t) + 4 for t, _ in body])
+            # `dh` is the double-height lines, by row offset from the top rule.
+            # Each one is two rows of the grid, so the body reserves a blank
+            # pair under it and the box comes out the height it draws.
+            if self.card_style == "big":
+                # Nothing in small type at all, so the title comes out of the
+                # top rule and goes in the box, twice the size, with the
+                # number under it.
+                value = self._card_value(item)
+                body = [("", None)] * 5
+                dh = [(1, item["label"], self.th["fg"]),
+                      (4, value, item["color"])]
+                title, widest = "", max(len(item["label"]), len(value)) * 2 + 4
+            else:
+                share = f'{_fmt_share(item["share"])} of {self.total_txt}'
+                note = self._wrap_cols(item["note"], ANSI_NOTE_COLS)
+                body = [("", None),                 # air under the title rule
+                        ("", None), ("", None),     # the double-height value
+                        (share, self.th["muted"]), ("", None)]
+                body += [(ln, self.note_c) for ln in note] + [("", None)]
+                dh = [(1, item["display"], item["color"])]
+                title = f' {item["label"]} '
+                widest = max(len(item["label"]) + 6,
+                             len(item["display"]) * 2 + 4)
+            inner = max([widest] + [len(t) + 4 for t, _ in body])
             cols, rows = inner + 2, len(body) + 2
             self.cards[i] = {"cols": cols, "rows": rows, "body": body,
+                             "dh": dh, "title": title,
                              "w": cols * self.tcw, "h": rows * self.tch}
 
     def _card(self, cv, d, i, alpha) -> None:
@@ -3984,7 +4030,8 @@ class AnsiDonutRenderer(DonutRenderer):
                          ("┘", (c0 + w - 1, r0 + h - 1))):
             grid[cell] = (ch, col, bg)
         # a TUI titles a box in the box's own top rule
-        self._text(grid, c0 + 2, r0, f' {item["label"]} ', col, bg)
+        if card["title"]:
+            self._text(grid, c0 + 2, r0, card["title"], col, bg)
         for k, (txt, fg) in enumerate(card["body"]):
             if txt:
                 self._text(grid, c0 + 3, r0 + 1 + k, txt, fg, bg)
@@ -3998,11 +4045,12 @@ class AnsiDonutRenderer(DonutRenderer):
                         (max(c0 + 1, min(c0 + w - 2, a[0])),
                          r0 + h - 1 if a[1] > r0 else r0), col)
         self._print(grid)
-        # the value as a double-height line -- DECDHL, the only way a terminal
-        # ever had two sizes of type on one screen
-        ImageDraw.Draw(self._cv).text(
-            ((c0 + 3) * self.tcw, (r0 + 1) * self.tch), item["display"],
-            font=self.fbig, fill=col)
+        # the big type as double-height lines -- DECDHL, the only way a
+        # terminal ever had two sizes of type on one screen
+        dd = ImageDraw.Draw(self._cv)
+        for dr, txt, fg in card["dh"]:
+            dd.text(((c0 + 3) * self.tcw, (r0 + dr) * self.tch), txt,
+                    font=self.fbig, fill=fg)
 
     # -- the rest of the furniture ------------------------------------------
     def _hole(self, d, alpha) -> None:
