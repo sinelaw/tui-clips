@@ -1,0 +1,213 @@
+{
+  "name": "vscode-source-breakdown",
+  "render": {
+    "size": [
+      1080,
+      1080
+    ],
+    "fps": 60,
+    "title": "VS Code 1.140 — source by concern",
+    "intro_caption": [
+      "3.52M LoC",
+      "every extension and the Rust CLI with it"
+    ],
+    "outro_caption": [
+      "32% of it is tests",
+      "18K end-to-end, 1.11M beside the code they test"
+    ],
+    "timing": {
+      "hold": 2.8
+    },
+    "donut": {
+      "style": "ansi",
+      "charset": "unicode",
+      "unit": "LoC",
+      "total": "3.52M",
+      "total_label": "LoC",
+      "thickness": 0.4,
+      "items": [
+        {
+          "label": "Inline unit tests",
+          "value": 1111840,
+          "display": "1.11M",
+          "note": "mocha suites in a test/ folder beside the code they test",
+          "color": [
+            74,
+            222,
+            128
+          ]
+        },
+        {
+          "label": "AI & agents",
+          "value": 807875,
+          "display": "808K",
+          "note": "chat, inline chat, the agent host, the Copilot extension",
+          "color": [
+            56,
+            189,
+            248
+          ]
+        },
+        {
+          "label": "Editor app",
+          "value": 455586,
+          "display": "456K",
+          "note": "the workbench: parts, panels, and every contributed feature",
+          "color": [
+            251,
+            191,
+            36
+          ]
+        },
+        {
+          "label": "Comments",
+          "value": 412041,
+          "display": "412K",
+          "note": "every comment line in the repo, tests and code alike",
+          "color": [
+            167,
+            139,
+            250
+          ]
+        },
+        {
+          "label": "Services & IPC",
+          "value": 181833,
+          "display": "182K",
+          "note": "platform services, the remote server, and the wiring between",
+          "color": [
+            244,
+            114,
+            182
+          ]
+        },
+        {
+          "label": "Rendering & UI",
+          "value": 130510,
+          "display": "131K",
+          "note": "the editor view, the DOM layer, and every widget on it",
+          "color": [
+            45,
+            212,
+            191
+          ]
+        },
+        {
+          "label": "Plugin runtime",
+          "value": 111131,
+          "display": "111K",
+          "note": "the extension host, its API surface, and the marketplace",
+          "color": [
+            248,
+            113,
+            113
+          ]
+        },
+        {
+          "label": "Plugins (TS)",
+          "value": 106689,
+          "display": "107K",
+          "note": "the built-in extensions: git, emmet, the terminal suggestions",
+          "color": [
+            148,
+            163,
+            184
+          ]
+        },
+        {
+          "label": "Text model",
+          "value": 47335,
+          "display": "47K",
+          "note": "the piece tree, cursors, view model — what an edit goes through",
+          "color": [
+            249,
+            146,
+            58
+          ]
+        },
+        {
+          "label": "Build & release",
+          "value": 45004,
+          "display": "45K",
+          "note": "gulp, esbuild, the pipelines, and the repo's own tooling",
+          "color": [
+            132,
+            204,
+            22
+          ]
+        },
+        {
+          "label": "Language servers",
+          "value": 44506,
+          "display": "45K",
+          "note": "the language-features extensions and the servers behind them",
+          "color": [
+            217,
+            70,
+            239
+          ]
+        },
+        {
+          "label": "CLI (Rust)",
+          "value": 19441,
+          "display": "19K",
+          "note": "the tunnel and launcher CLI, the one Rust crate here",
+          "color": [
+            74,
+            222,
+            128
+          ]
+        },
+        {
+          "label": "End-to-end tests",
+          "value": 18158,
+          "display": "18K",
+          "note": "smoke and integration suites, driving a built application",
+          "color": [
+            56,
+            189,
+            248
+          ]
+        },
+        {
+          "label": "Input & keys",
+          "value": 16048,
+          "display": "16K",
+          "note": "keybindings, commands and actions: keys in, actions out",
+          "color": [
+            251,
+            191,
+            36
+          ]
+        },
+        {
+          "label": "Syntax & themes",
+          "value": 14150,
+          "display": "14K",
+          "note": "tokenisation, the theme service, and the colour themes",
+          "color": [
+            167,
+            139,
+            250
+          ]
+        },
+        {
+          "label": "Everything else",
+          "value": 2039,
+          "display": "2.0K",
+          "note": "bootstrap files, entry points, odds and ends",
+          "color": [
+            244,
+            114,
+            182
+          ],
+          "visit": false
+        }
+      ]
+    }
+  },
+  "encode": {
+    "crf": 18,
+    "preset": "slow"
+  }
+}

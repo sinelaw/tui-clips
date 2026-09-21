@@ -1076,7 +1076,10 @@ rest grow into the gap, and say what the ring is now. Repeat. See
 takes fresh's 822K lines down to the 236K that are neither tests, comments nor
 TypeScript.
 [`examples/fresh-source-peel-big.json`](examples/fresh-source-peel-big.json)
-is the same clip with `"card": "big"`.
+is the same clip with `"card": "big"`, and
+[`examples/vscode-source-peel.json`](examples/vscode-source-peel.json) is the
+same argument made about VS Code, where what comes out of the ring after the
+tests is the 808K lines of chat and agents.
 
 ```jsonc
 "peel": [
@@ -1113,29 +1116,85 @@ everything derived from an angle: the labels around the ring, the cards (a
 share is a share *of* something, and the something shrinks), and the camera
 that frames a section together with its card.
 
-### Where the fresh numbers come from
+### Where the numbers come from
 
-The three `fresh-source-*.json` specs are generated, not written:
-[`examples/fresh-source-survey.py`](examples/fresh-source-survey.py) counts a
-checkout of [fresh](https://github.com/sinelaw/fresh) and prints the whole
-spec, so the picture cannot drift from the count.
+The `*-source-*.json` specs are generated, not written:
+[`examples/source-survey.py`](examples/source-survey.py) counts a checkout and
+prints the whole spec, so the picture cannot drift from the count.
 
 ```sh
-python3 examples/fresh-source-survey.py ~/src/fresh                 # the table
-python3 examples/fresh-source-survey.py ~/src/fresh --spec  > examples/fresh-source-breakdown.json
-python3 examples/fresh-source-survey.py ~/src/fresh --peel  > examples/fresh-source-peel.json
-python3 examples/fresh-source-survey.py ~/src/fresh --peel --big > examples/fresh-source-peel-big.json
+python3 examples/source-survey.py ~/src/fresh                    # the table
+python3 examples/source-survey.py ~/src/fresh  --spec > examples/fresh-source-breakdown.json
+python3 examples/source-survey.py ~/src/fresh  --peel > examples/fresh-source-peel.json
+python3 examples/source-survey.py ~/src/fresh  --peel --big > examples/fresh-source-peel-big.json
+python3 examples/source-survey.py ~/src/vscode --peel > examples/vscode-source-peel.json
 ```
 
-It needs `cloc` on the path. What it does that `cloc` alone cannot: every
-`#[cfg(test)]` block is cut out of its file and counted as a test rather than
-as the subsystem it sits in, and the two halves are written to a scratch tree
-that `cloc` is then run over — which is where the comment counts come from, so
-comments can leave the ring with the tests. Everything else is bucketed by
-path, and those path rules are fresh's own: a concern is a judgement about
-what belongs with what, and nothing can read that off a directory tree. The
-`--peel` run also refuses to print a spec whose last stage says *core only
-(rust)* while some TypeScript would survive the peel.
+It needs `cloc` on the path. What it does that `cloc` alone cannot: every unit
+test is cut out of the code it tests — a `#[cfg(test)]` block out of its Rust
+file, a `test/` folder out of the directory it sits in — and the halves are
+written to a scratch tree that `cloc` is then run over, which is where the
+comment counts come from, so comments can leave the ring with the tests.
+Everything else is bucketed by path, and the path rules are per repository: a
+concern is a judgement about what belongs with what, and nothing can read that
+off a directory tree. Pick the rules with `--repo fresh` or `--repo vscode`,
+or let the directory's name say. A `--peel` run also refuses to print a spec
+whose last stage makes a claim the checkout would not bear out — fresh's ends
+on *core only (rust)*, so a stray TypeScript file surviving the peel stops the
+run rather than getting animated.
+
+**Two editors, counted the same way.** The bucket names mean the same thing in
+both, which is the only reason the two rings can be read against each other.
+Shares are of each repo's own total.
+
+| | fresh 0.5.1 | VS Code 1.140 |
+|---|---|---|
+| total | 822K | 3.52M |
+| tests | 330K (40%) | 1.13M (32%) |
+| — of which end-to-end | 233K (71% of tests) | 18K (2%) |
+| comments | 204K (25%) | 413K (12%) |
+| code | 289K (35%) | 1.98M (56%) |
+| comments per 100 lines of code | 33 | 13 |
+
+The two test strategies are mirror images. fresh's tests are mostly
+integration crates that drive the whole editor from outside it; VS Code's are
+almost entirely unit suites sitting beside the code they test, and the part
+that drives a built application is 18K lines — half a percent of the repo.
+
+Of the code itself, VS Code's largest concern is one fresh does not have at
+all: chat, inline chat, the agent host and the bundled Copilot extension come
+to 808K lines, 41% of its code, and another 688K lines of the test bucket are
+theirs. Take AI and tests and comments out and what is left — the editor, its
+workbench, its extension host — is 1.17M lines against fresh's 289K.
+
+| concern | fresh | VS Code | VS Code, no AI |
+|---|---|---|---|
+| AI & agents | — | 41% | — |
+| Editor app | 29% | 23% | 39% |
+| Rendering & UI | 23% | 7% | 11% |
+| Plugins (TS) | 18% | 5% | 9% |
+| Services & IPC | 6% | 9% | 16% |
+| Text model | 6% | 2% | 4% |
+| Input & keys | 4% | 1% | 1% |
+| Plugin runtime | 4% | 6% | 10% |
+| Language servers | 2% | 2% | 4% |
+| Syntax & themes | 2% | 1% | 1% |
+
+Where they differ says what each one had to build. fresh draws its own
+screen — a terminal UI stack, widgets and all — and rendering is 23% of its
+code against VS Code's 11%, which gets a layout engine from the browser for
+nothing. The plugin story is inverted twice over: fresh is Rust with a 53K
+TypeScript plugin layer, VS Code is TypeScript with a 19K Rust CLI, and VS
+Code spends proportionally more on the *runtime* (the extension host, the
+marketplace) than on anything it ships through it. What matches almost
+exactly is the language-server client, 2% of the code in both.
+
+Judgement calls worth knowing about, since they move the numbers: test
+fixtures are excluded as data rather than code (one colourisation fixture in
+VS Code is 147K lines on its own); the Copilot extension is counted where it
+sits, vendored upstream code included; `.d.ts` files are skipped in both; and
+VS Code's build tooling gets a bucket of its own, where fresh's falls into
+"Everything else".
 
 ## The printed donut
 
