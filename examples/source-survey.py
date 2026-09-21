@@ -2,7 +2,8 @@
 
 Four kinds of line:
 
-  code       in a test of the whole program, run from outside it
+  code       in a test that lives outside the code it tests: its own crate
+             in Rust, the repository's own test/ tree in TypeScript
   code       in a unit test living with the code it tests -- a `#[cfg(test)]`
              block in Rust, a `test/` folder beside the source in TypeScript
   comment    anywhere at all, counted together rather than per concern
@@ -47,7 +48,7 @@ import sys
 import tempfile
 from collections import defaultdict
 
-E2E = "End-to-end tests"
+E2E = "Integration tests"
 UNIT = "Inline unit tests"
 COMMENTS = "Comments"
 # Everything the rules do not name is folded into one section rather than
@@ -69,8 +70,9 @@ FRESH = {
     "intro": "every crate, Rust and TypeScript alike",
     "code": (".rs", ".ts", ".tsx", ".js", ".jsx"),
     "skip_dir": {".git", "target", "node_modules", "dist", "vendor",
-                 ".vitepress"},
+                 ".vitepress", "fixtures"},
     "skip_file": (".d.ts", ".min.js"),
+    "skip_path": (),
     # a `tests/` directory is an integration crate, compiled on its own
     # against the public API; a src file named test*.rs is a unit test moved
     # out of its file for room, and a #[cfg(test)] block is one still in it
@@ -137,7 +139,7 @@ FRESH = {
     # What each slice is, in one line, for the card the camera stops on. The
     # numbers come out of the tree; these do not, and could not.
     "notes": {
-        E2E: "integration crates that drive the whole editor from outside it",
+        E2E: "test crates built against the editor's API rather than into it",
         UNIT: "#[cfg(test)] blocks, living in the file they are testing",
         COMMENTS: "every comment line in the repo, tests and code alike",
         "Editor app":
@@ -175,6 +177,11 @@ VSCODE = {
                  ".build", "typings", "vscode-dts", "fixtures",
                  "colorize-fixtures"},
     "skip_file": (".d.ts", ".min.js"),
+    # Every file under here opens "DO NOT modify, this file was COPIED from
+    # 'microsoft/vscode'", and 98% of their lines are byte-identical to the
+    # original a few directories away. Counting both copies credits the same
+    # source twice, once to the editor and once to the extension.
+    "skip_path": ("extensions/copilot/src/util/vs/",),
     # VS Code puts its unit tests in a `test/` folder beside the code they
     # test -- the same relationship a #[cfg(test)] block has to its file, one
     # directory further out -- and its end-to-end tests in the repo's own
@@ -188,17 +195,44 @@ VSCODE = {
     "peel_title": "editor only (no AI)",
     "pure": None,
     "rules": [
-        # Chat, the agent host and the Copilot extension are one concern and a
-        # new one: none of it existed when this was an editor and nothing else.
-        # It is first because everything after it would otherwise absorb it --
-        # chat alone is most of `workbench/contrib`.
+        # Chat, the agent host and the Copilot extension are one concern and
+        # a new one: none of it existed when this was an editor and nothing
+        # else. It is first because everything after it would otherwise
+        # absorb it -- chat alone is most of `workbench/contrib`.
+        #
+        # The list is long because the concern is spread: the model context
+        # protocol, the editor-side inline completions, the agent tools the
+        # terminal grew, the voice services, the extension-host bridges and
+        # the CLI's agent commands are all the same subject in twelve places.
+        # A bucket that named only the obvious ones would be 41% of the code
+        # while its own description said something narrower than it counted.
         ("AI & agents", (
             "src/vs/workbench/contrib/chat/",
             "src/vs/workbench/contrib/inlineChat/",
             "src/vs/workbench/contrib/inlineCompletions/",
+            "src/vs/workbench/contrib/mcp/",
+            "src/vs/workbench/contrib/agentsVoice/",
+            "src/vs/workbench/contrib/speech/",
+            "src/vs/workbench/contrib/welcomeAgentSessions/",
+            "src/vs/workbench/contrib/terminalContrib/chat",
+            "src/vs/workbench/services/chat/",
+            "src/vs/workbench/services/mcp/",
+            "src/vs/workbench/services/agentHost/",
+            "src/vs/workbench/api/common/extHostChat",
+            "src/vs/workbench/api/common/extHostMcp",
+            "src/vs/workbench/api/common/extHostSpeech",
+            "src/vs/workbench/api/common/extHostAgent",
+            "src/vs/workbench/api/common/extHostLanguageModel",
+            "src/vs/workbench/api/browser/mainThreadChat",
+            "src/vs/workbench/api/browser/mainThreadMcp",
+            "src/vs/workbench/api/browser/mainThreadSpeech",
+            "src/vs/workbench/api/browser/mainThreadAgent",
+            "src/vs/editor/contrib/inlineCompletions/",
             "src/vs/platform/agentHost/", "src/vs/platform/agentPlugins/",
-            "src/vs/platform/chat/", "src/vs/sessions/",
-            "extensions/copilot/")),
+            "src/vs/platform/chat/", "src/vs/platform/mcp/",
+            "src/vs/sessions/", "extensions/copilot/",
+            "scripts/chat-simulation/", ".github/skills/",
+            "cli/src/tunnels/agent", "cli/src/commands/agent")),
         ("Language servers", (
             "extensions/css-language-features/",
             "extensions/html-language-features/",
@@ -234,11 +268,22 @@ VSCODE = {
             "src/vs/base/browser/keyboardEvent", "src/vs/base/common/keyCodes",
             "src/vs/base/common/keybindings")),
         ("Text model", ("src/vs/editor/common/",)),
+        # The platform's own widgets are named one by one because they sit
+        # among the services rather than beside the rest of the view, and
+        # fresh counts its widgets as rendering -- a comparison of the two
+        # numbers is only worth making if they are a count of the same thing.
         ("Rendering & UI", (
             "src/vs/editor/browser/", "src/vs/editor/standalone/",
             "src/vs/base/browser/", "src/vs/workbench/browser/",
             "src/vs/workbench/electron-browser/",
-            "src/vs/base/parts/quickinput/")),
+            "src/vs/platform/quickinput/", "src/vs/platform/browserView/",
+            "src/vs/platform/actionWidget/", "src/vs/platform/contextview/",
+            "src/vs/platform/hover/", "src/vs/platform/list/",
+            "src/vs/platform/menubar/", "src/vs/platform/dialogs/",
+            "src/vs/platform/dnd/", "src/vs/platform/auxiliaryWindow/",
+            "src/vs/platform/opener/", "src/vs/platform/progress/",
+            "src/vs/platform/notification/", "src/vs/platform/domWidget/",
+            "src/vs/platform/layout/", "src/vs/platform/markdown/")),
         ("Services & IPC", (
             "src/vs/platform/", "src/vs/base/parts/", "src/vs/server/",
             "src/vs/workbench/services/", "src/vs/code/")),
@@ -250,7 +295,7 @@ VSCODE = {
         UNIT: "mocha suites in a test/ folder beside the code they test",
         COMMENTS: "every comment line in the repo, tests and code alike",
         "AI & agents":
-            "chat, inline chat, the agent host, the Copilot extension",
+            "chat, agents, MCP, voice — and the Copilot extension with them",
         "Editor app":
             "the workbench: parts, panels, and every contributed feature",
         "Rendering & UI":
@@ -305,6 +350,7 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") \
 CODE = CFG["code"]
 SKIP_DIR = CFG["skip_dir"]
 SKIP_FILE = CFG["skip_file"]
+SKIP_PATH = CFG["skip_path"]
 RULES = CFG["rules"]
 NOTES = CFG["notes"]
 
@@ -397,6 +443,8 @@ def survey():
                     continue
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
+                if rel.startswith(SKIP_PATH):
+                    continue
                 ext = os.path.splitext(fn)[1]
                 whole = open(full, encoding="utf-8", errors="replace").read()
                 if CFG["e2e"](rel, fn):
@@ -436,7 +484,13 @@ def cloc(tmp, buckets):
     """
     try:
         out = subprocess.run(
-            ["cloc", "--by-file", "--csv", "--quiet", "--follow-links", tmp],
+            ["cloc", "--by-file", "--csv", "--quiet", "--follow-links",
+             # cloc suppresses a file whose content it has already seen, and
+             # which copy it keeps depends on the order it walked them in --
+             # so two runs of this script disagreed by a few hundred lines
+             # about which bucket a duplicate belonged to. It also has no
+             # entry for .mts, and silently counted none of them.
+             "--skip-uniqueness", "--force-lang=TypeScript,mts", tmp],
             capture_output=True, text=True, check=True).stdout
     except FileNotFoundError:
         raise SystemExit(
@@ -472,7 +526,7 @@ def short(n):
 
 def spec(loc, total):
     """the whole donut spec, so the picture cannot drift from the count"""
-    tests = loc["End-to-end tests"] + loc["Inline unit tests"]
+    tests = loc[E2E] + loc[UNIT]
     items = []
     for i, (k, v) in enumerate(sorted(loc.items(), key=lambda kv: -kv[1])):
         d = {"label": k, "value": v, "display": short(v), "note": NOTES[k],
@@ -488,7 +542,7 @@ def spec(loc, total):
             "intro_caption": [f"{short(total)} LoC", CFG["intro"]],
             "outro_caption": [
                 f"{round(100 * tests / total)}% of it is tests",
-                f"{short(loc[E2E])} end-to-end, "
+                f"{short(loc[E2E])} standing apart, "
                 f"{short(loc[UNIT])} {CFG['unit_where']}"],
             "timing": {"hold": 2.8},
             "donut": {
@@ -613,7 +667,7 @@ def main():
     for k, v in sorted(loc.items(), key=lambda kv: -kv[1]):
         print(f"{k:24s} {v:9,d} {100 * v / total:6.1f}%  {files.get(k, 0)}")
     print(f"{'TOTAL':24s} {total:9,d}")
-    tests = loc["End-to-end tests"] + loc["Inline unit tests"]
+    tests = loc[E2E] + loc[UNIT]
     print(f"\ntests are {100 * tests / total:.0f}% of it "
           f"({tests:,d} of {total:,d})")
     if rest:
