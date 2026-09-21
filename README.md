@@ -510,7 +510,7 @@ the dimmed bands, the captions, the outro — is identical.
        "note_at": "below-right",       // above|below x left|right
        "label": "BEFORE",              // this beat's banner ...
        "tone": "before",               // ... and its colour, a theme key
-       "transition": "push",           // shove the last screen out, don't fade
+       "transition": "push",           // or "wipe" / "shatter"; default is a fade
        "head": "where you are"}        // `sub` is optional
     ]
   },
@@ -760,6 +760,97 @@ Two tags either side of a wipe do not cross-fade. Each is clipped to its own
 side of the moving edge, so the words are replaced in place exactly as the
 screen under them is -- which is what you want when both tags sit at the same
 spot, and that shared position is the point of them.
+
+## Taking one screen apart, inside a solo clip
+
+An [explode spec](#explode-specs) is a whole clip shape: it takes a capture
+apart and gives every piece its own beat. A solo clip can do the smaller
+version of the same thing in **one beat** — name some rects, deal them out of
+the picture, label them:
+
+```jsonc
+{"shot": "settle", "view": "bar", "hold": 2.9,
+ "explode": {
+   "dim": 0.75,                 // how far the rest of the screen falls back
+   "at": 0.35, "over": 0.85,    // seconds into the hold: when, and how long
+   "pieces": [
+     {"rows": [1, 2], "cols": [0, 9],   "offset": [19, 3], "label": "new workspace"},
+     {"rows": [1, 2], "cols": [28, 36], "offset": [-6, 6], "label": "search"},
+     {"rows": [1, 2], "cols": [38, 39], "offset": [-9, 9], "label": "menu"}]}}
+```
+
+A piece is drawn at its own rect plus its `offset`, in **cells**; the scale is
+applied at render time, so a spec written against a
+[UI dump](#where-the-rects-come-from) is in the program's own coordinates and
+survives a font or geometry change. Give `offset` outright, or let `spread`
+derive one from where the piece sits inside its `container` (which defaults to
+the beat's `view` rect, then to the whole capture) — the same rule the explode
+*shape* uses, so a plan written for one reads in the other.
+
+The hole a piece leaves is drawn as ground, not as a dimmed copy: a control
+that has moved must not leave a ghost where it was, or the picture says it is
+in two places. Everything not lifted falls back by `dim` as the move goes, so
+the pieces are what the eye lands on — which also means **an offset is a move
+within the capture**. There is nothing above row 0 to move into, so pieces are
+dealt down and sideways into whatever the screen has room for, and a piece set
+down on top of text reads as two things in one place however far back the text
+is pushed.
+
+`at` and `over` are seconds into the beat's hold rather than shares of it, so
+retiming a beat does not retime the move inside it — the same reason
+[`swipe`](#swiping-one-screen-onto-another) counts in seconds. `over: 0` means
+*already apart*, which is what the next beat wants when it is holding open
+what this one opened.
+
+Each piece with a `label` gets a chip, and a hairline around the piece for the
+chip to belong to. Both are drawn at frame scale, like a tag and unlike the
+picture: words about a picture are not part of it, so they keep their size
+however far in the camera is. `label_at` is `above` (default) or `below`, and
+a chip with no room above takes the space below instead. `chip_size` on
+`render` sets the type size.
+
+## Breaking out of one subject into another
+
+`"transition": "shatter"` cuts the outgoing screen into a grid and throws the
+pieces off the frame while the next one sweeps in behind them.
+
+```jsonc
+{"shot": "settle", "view": "bar", "transition": "shatter",
+ "shatter": {"cols": 12, "rows": 9, "spread": 1.15, "spin": 14}}
+```
+
+It is the one transition that is not about continuity. A `push` and a `wipe`
+both say *and then this*; a shatter says *forget that, look here*, which is
+what a clip needs when the next beat is a **different part of the same
+window** rather than a later state of the same part. Use it once. Two of them
+in a clip and the picture is the effect.
+
+`cols` x `rows` is the grid (default 12 x 9 -- fine enough that a tile is a
+piece of the picture rather than a quarter of it, coarse enough that the count
+stays in the low hundreds, since every tile is a rotate and a paste on every
+frame of the travel). `spread` is how far the furthest tiles travel, in frame
+widths (default 1.15); `spin` is their rotation in degrees at full travel
+(default 14); `sweep` (default `true`) wipes the arrival in behind a bright
+edge in the beat's `tone`, exactly as [`wipe`](#wiping-one-beat-onto-the-next)
+does -- set it `false` to have the next screen simply sit there while the old
+one comes apart. It takes `timing.shatter`, falling back to `timing.push`.
+
+Three things about the motion are deliberate, and all three are what stop it
+reading as a filter:
+
+- **It accelerates.** Displacement is quadratic in the travel, so the first
+  third of it barely moves; the outgoing picture stays readable right up to
+  the moment it stops being one.
+- **A tile moves by its own distance from the centre**, not a fixed distance
+  along it. Normalising would send every tile the same way-out, which is a
+  grid dissolving evenly rather than something breaking: the corners have to
+  outrun the middle. The middle barely moves, and the fade carries it out.
+- **The jitter is hashed off the tile's index**, never drawn from `random`, so
+  two renders of one spec agree and a `--draft` is the render it stands in
+  for.
+
+Tags either side of a shatter ride its edge rather than cross-fading, the same
+way they do across a wipe.
 
 ## Before and after in one clip
 

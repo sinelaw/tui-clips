@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 
-from PIL import Image, ImageChops  # noqa: E402
+from PIL import Image, ImageChops, ImageDraw, ImageStat  # noqa: E402
 
 import capture as cap  # noqa: E402
 import render  # noqa: E402
@@ -730,6 +730,169 @@ def test_mark_and_at_reach_tui_capture(tmp):
           "a mark step becomes --mark")
     check(mod.step_argv({"at": 12.5}, "solo", tmp, {}) == ["--at", "12.5"],
           "an at step becomes --at")
+
+
+def test_shatter_breaks_the_old_screen_and_sweeps_the_new_one_in(tmp):
+    """the outgoing screen leaves in pieces; the incoming one arrives behind.
+
+    A push and a wipe both say "and then this". A shatter is for the one
+    boundary in a clip that is not continuous -- a different part of the same
+    window rather than a later state of the same part -- so the test is that
+    the two screens are doing *different* things at the same moment: the old
+    one is coming apart, on a curve that leaves it readable until it does,
+    and the new one is sweeping in behind it.
+    """
+    a = solid(os.path.join(tmp, "a.png"), (200, 0, 0))
+    b = solid(os.path.join(tmp, "b.png"), (0, 0, 200))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 0.5},
+           {"shot": "b", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 0.5, "transition": "shatter",
+            "shatter": {"cols": 6, "rows": 4, "spread": 1.2, "spin": 0}}]
+    r = render.make(spec_for(tmp, annotations=ann,
+                             timing={"intro": 0, "zoom": 0, "hold": 0.5,
+                                     "pan": 0.2, "push": 0.6, "outro": 0.2}),
+                    {"solo": a}, os.path.join(tmp, "f"), {"a": a, "b": b})
+
+    check(r.gap(0) == 0.6, "a shatter takes `push`'s travel when it has none of its own")
+
+    w = h = 400
+
+    def at(pan):
+        lay = Image.new("RGB", (w, h), (0, 0, 0))
+        r.shattered(lay, 0, 1, pan, w, h)
+        return lay
+
+    def moved(im):
+        """how far the frame has travelled from the whole old screen"""
+        d = ImageChops.difference(im, at(0.0))
+        return sum(ImageStat.Stat(d).mean) / 3.0
+
+    check(at(0.0).getpixel((w // 2, h // 2)) == (200, 0, 0),
+          "at the start of the travel the old screen is still whole")
+    # Quadratic: a tenth of the way in, almost nothing has happened yet, which
+    # is what keeps the outgoing picture readable up to the moment it breaks.
+    early, mid = moved(at(0.12)), moved(at(0.5))
+    check(early < 12, f"a tenth of the way in the picture is still itself ({early:.1f})")
+    check(mid > 3 * early, f"and half way it has come apart ({mid:.1f})")
+
+    check(at(0.9).getpixel((2, 2)) == (0, 0, 200),
+          "by the end the arrival has swept the frame")
+
+def test_shatter_is_the_same_break_every_render(tmp):
+    """tile jitter is hashed off the tile index, not drawn from `random`.
+
+    A draft has to be the render it stands in for, and two runs of one spec
+    have to agree -- so the scatter is deterministic. It also has to be a
+    scatter: if every tile moved by the same vector the effect would be a
+    slide with extra steps.
+    """
+    a = solid(os.path.join(tmp, "a.png"), (200, 0, 0))
+    b = solid(os.path.join(tmp, "b.png"), (0, 0, 200))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False},
+           {"shot": "b", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "transition": "shatter",
+            "shatter": {"cols": 5, "rows": 5, "spread": 0.8, "spin": 10,
+                        "sweep": False}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a, "b": b})
+    w = h = 300
+    one = Image.new("RGB", (w, h), (0, 0, 0))
+    two = Image.new("RGB", (w, h), (0, 0, 0))
+    r.shattered(one, 0, 1, 0.45, w, h)
+    r.shattered(two, 0, 1, 0.45, w, h)
+    check(ImageChops.difference(one, two).getbbox() is None,
+          "two renders of one moment are identical")
+
+    # Corners travel further than the middle, because a tile is displaced by
+    # its own distance from the centre -- which is what makes it a burst
+    # rather than a grid coming apart evenly.
+    far = Image.new("RGB", (w, h), (0, 0, 0))
+    r.shattered(far, 0, 1, 0.6, w, h)
+    check(far.getpixel((4, 4)) != (200, 0, 0),
+          "the corner tile has left its corner")
+    check(far.getpixel((w // 2, h // 2))[0] > 100,
+          "the middle tile is still where it was")
+
+
+def banded(path, ground, band, box, w=600, h=400):
+    """a flat screen with one rect in another colour, to track a piece by"""
+    im = Image.new("RGB", (w, h), ground)
+    ImageDraw.Draw(im).rectangle(box, fill=band)
+    im.save(path)
+    return path
+
+
+def test_explode_lifts_a_named_rect_and_leaves_ground(tmp):
+    """a piece is drawn at its rect plus its offset; its hole is ground.
+
+    This is the whole of what a beat-level explode means. The hole matters as
+    much as the move: a piece that has gone somewhere must not leave a copy of
+    itself where it was, or the picture says the control is in two places.
+    """
+    # rows 1..2, cols 0..9 of a 60x20 capture -> (0, 20)-(90, 40) at 600x400
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"dim": 0.0, "at": 0.0, "over": 0.5, "pieces": [
+                {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5],
+                 "label": "the piece"}]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    red, blue = (200, 0, 0), (0, 0, 200)
+    bg = tuple(r.th["bg"])
+
+    start = r.screen(0, 0.0, 1.0)
+    check(start.getpixel((10, 30)) == red, "before it starts the piece is where it was")
+
+    end = r.screen(0, 0.999, 1.0)
+    check(end.getpixel((10, 30)) == bg, "once open its old place is ground, not a ghost")
+    check(end.getpixel((10, 30 + 5 * r.RH)) == red, "and the piece is five rows down")
+    check(end.getpixel((10, 300)) == blue, "the rest of the screen is untouched")
+
+
+def test_explode_dims_what_it_did_not_lift(tmp):
+    """the pieces are what the eye lands on, so everything else falls back."""
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"dim": 0.8, "at": 0.0, "over": 0.5, "pieces": [
+                {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5]}]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    end = r.screen(0, 0.999, 1.0)
+    rest = end.getpixel((10, 300))
+    check(rest != (0, 0, 200) and rest[2] < 90,
+          f"the untouched screen has fallen back ({rest})")
+    check(end.getpixel((10, 30 + 5 * r.RH)) == (200, 0, 0),
+          "the piece itself has not -- it is what the beat is about")
+
+
+def test_explode_counts_in_seconds_and_can_start_already_open(tmp):
+    """`at` and `over` are seconds into the hold, and `over: 0` is 'open'.
+
+    Shares of the hold would mean retiming a beat retimed the move inside it;
+    seconds are what let a following beat hold what this one opened, which is
+    what `over: 0` is for.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    piece = {"rows": [1, 2], "cols": [0, 9], "offset": [0, 5]}
+    ann = [{"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 4.0,
+            "explode": {"at": 1.0, "over": 1.0, "pieces": [piece]}},
+           {"shot": "a", "rows": [0, 20], "cols": [0, 60], "band": False,
+            "hold": 1.0,
+            "explode": {"at": 0.0, "over": 0, "pieces": [piece]}}]
+    r = render.make(spec_for(tmp, annotations=ann), {"solo": a},
+                    os.path.join(tmp, "f"), {"a": a})
+    check(r.explode_at(0, 0.24) == 0.0, "nothing happens before `at`")
+    check(r.explode_at(0, 0.375) > 0.0, "it is moving a quarter of a second in")
+    check(r.explode_at(0, 0.5) == 1.0, "and finished after `over` seconds")
+    check(r.explode_at(0, 0.9) == 1.0, "... and stays finished for the rest of the hold")
+    check(r.explode_at(1, 0.0) == 1.0, "`over: 0` starts open, for a beat that holds one")
 
 
 def main():
