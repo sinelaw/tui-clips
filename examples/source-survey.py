@@ -521,6 +521,17 @@ def cloc(tmp, buckets):
     return seen
 
 
+# Half the default running time, beat for beat. The defaults are paced for a
+# ring of six sections a reader is meeting for the first time; these clips
+# have thirteen and fifteen, and at that length every beat the eye has
+# already finished is a wait. The focus pull shortens with them -- a rack
+# focus that takes longer than the hold it introduces is the whole beat.
+FAST = {"grow": 0.6, "intro": 1.1, "move": 0.22, "hold": 1.3,
+        "regroup": 0.25, "outro": 1.0,
+        "gather": 0.22, "eject": 0.3, "reflow": 0.4, "settle": 1.1}
+FOCUS_TIME = [0.2, 0.14]
+
+
 def short(n):
     """a line count as a person would say it out loud
 
@@ -576,11 +587,12 @@ def spec(loc, total):
                 CFG["tests_line"] if CFG["tests_bucket"] else
                 f"{short(loc[E2E])} standing apart, "
                 f"{short(loc[UNIT])} {CFG['unit_where']}"],
-            "timing": {"hold": 2.8},
+            "timing": FAST,
             "donut": {
                 "style": "ansi", "charset": "unicode",
                 "unit": "LoC", "total": short(total),
                 "total_label": "LoC", "thickness": 0.40,
+                "focus_time": FOCUS_TIME,
                 "items": items,
             },
         },
@@ -632,11 +644,12 @@ def peel_spec(loc, total, card="full"):
             "intro_caption": ["code + tests + comments", ""],
             "outro_caption": ["", ""],
             "labels": {"donut": "everything"},
-            "timing": {"hold": 2.6},
+            "timing": FAST,
             "donut": {
                 "style": "ansi", "charset": "unicode",
                 "unit": "LoC", "total": short(total),
                 "total_label": "LoC", "thickness": 0.40,
+                "focus_time": FOCUS_TIME,
                 "card": card,
                 "items": items,
                 "peel": [

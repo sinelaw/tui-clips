@@ -19,7 +19,16 @@
       "donut": "everything"
     },
     "timing": {
-      "hold": 2.6
+      "grow": 0.6,
+      "intro": 1.1,
+      "move": 0.22,
+      "hold": 1.3,
+      "regroup": 0.25,
+      "outro": 1.0,
+      "gather": 0.22,
+      "eject": 0.3,
+      "reflow": 0.4,
+      "settle": 1.1
     },
     "donut": {
       "style": "ansi",
@@ -28,6 +37,10 @@
       "total": "814K",
       "total_label": "LoC",
       "thickness": 0.4,
+      "focus_time": [
+        0.2,
+        0.14
+      ],
       "card": "full",
       "items": [
         {
