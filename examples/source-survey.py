@@ -79,6 +79,8 @@ FRESH = {
     "e2e": lambda rel, fn: "tests" in rel.split("/"),
     "unit": lambda rel, fn: fn.startswith("test") and fn.endswith(".rs"),
     "unit_where": "in the files they test",
+    # fresh's two kinds of test are 70/30, so the ring shows both
+    "tests_bucket": None,
     "peel_drop": "Plugins (TS)",
     "peel_title": "core only (rust)",
     # the last header is a claim about the language; make it earn that
@@ -191,6 +193,11 @@ VSCODE = {
                              or "tests" in rel.split("/")
                              or ".test." in fn),
     "unit_where": "beside the code they test",
+    # 98% of VS Code's test lines are the colocated kind, so the ring says
+    # "tests" once rather than spending a slice and a beat on a 0.5% sliver.
+    # The table still prints the split.
+    "tests_bucket": "Tests",
+    "tests_line": "unit suites beside the code, smoke tests over a build",
     "peel_drop": "AI & agents",
     "peel_title": "editor only (no AI)",
     "pure": None,
@@ -291,6 +298,7 @@ VSCODE = {
             "src/vs/editor/contrib/", "src/vs/workbench/", "src/vs/base/")),
     ],
     "notes": {
+        "Tests": "unit suites beside the code, and smoke tests over a build",
         E2E: "smoke and integration suites, driving a built application",
         UNIT: "mocha suites in a test/ folder beside the code they test",
         COMMENTS: "every comment line in the repo, tests and code alike",
@@ -524,9 +532,32 @@ def short(n):
     return f"{n / 1000:.0f}K" if n >= 9500 else f"{n / 1000:.1f}K"
 
 
+def for_ring(loc):
+    """the buckets as the ring draws them, which is not always as counted.
+
+    A repo whose two kinds of test are 98% one of them has no business
+    spending two slices and two beats of the camera on the distinction: the
+    sliver is unreadable at ring scale and the clip stops twice to say the
+    same word. The table still reports both -- the split is a fact about the
+    repository, it is just not a fact this picture is about.
+    """
+    one = CFG["tests_bucket"]
+    if not one:
+        return dict(loc)
+    d = {k: v for k, v in loc.items() if k not in (E2E, UNIT)}
+    d[one] = loc[E2E] + loc[UNIT]
+    return d
+
+
+def test_slices():
+    """the bucket names the ring uses for tests, largest first"""
+    return [CFG["tests_bucket"]] if CFG["tests_bucket"] else [E2E, UNIT]
+
+
 def spec(loc, total):
     """the whole donut spec, so the picture cannot drift from the count"""
-    tests = loc[E2E] + loc[UNIT]
+    loc = for_ring(loc)
+    tests = sum(loc[k] for k in test_slices())
     items = []
     for i, (k, v) in enumerate(sorted(loc.items(), key=lambda kv: -kv[1])):
         d = {"label": k, "value": v, "display": short(v), "note": NOTES[k],
@@ -542,6 +573,7 @@ def spec(loc, total):
             "intro_caption": [f"{short(total)} LoC", CFG["intro"]],
             "outro_caption": [
                 f"{round(100 * tests / total)}% of it is tests",
+                CFG["tests_line"] if CFG["tests_bucket"] else
                 f"{short(loc[E2E])} standing apart, "
                 f"{short(loc[UNIT])} {CFG['unit_where']}"],
             "timing": {"hold": 2.8},
@@ -556,13 +588,16 @@ def spec(loc, total):
     }, indent=2, ensure_ascii=False)
 
 
-# Comments go out with the tests: they are not what the ring is a
-# breakdown *of* either, and a reader who wants to know how much code
-# there is does not want the prose about it counted in.
-# In ring order, which is read order: the camera walks round rather than
-# doubling back. Comments are the second biggest thing in the repo and get a
-# beat of their own -- a quarter of the ring cannot fly out unexplained.
-TESTS = [E2E, COMMENTS, UNIT]
+def peeled_first(loc):
+    """what goes out of the ring before anything else does.
+
+    Comments go with the tests: they are not what the ring is a breakdown
+    *of* either, and a reader who wants to know how much code there is does
+    not want the prose about it counted in. Largest first, which is ring
+    order and so read order -- the camera walks round rather than doubling
+    back, and a quarter of the ring cannot fly out unexplained.
+    """
+    return sorted(test_slices() + [COMMENTS], key=lambda k: -loc[k])
 
 
 def peel_spec(loc, total, card="full"):
@@ -573,15 +608,17 @@ def peel_spec(loc, total, card="full"):
     to take anything out of a ring, and it is the reason the totals are given
     per stage rather than scaled.
     """
+    loc = for_ring(loc)
+    tests = peeled_first(loc)
     drop = CFG["peel_drop"]
-    s2 = total - sum(loc[k] for k in TESTS)
+    s2 = total - sum(loc[k] for k in tests)
     s3 = s2 - loc[drop]
     items = []
     for i, (k, v) in enumerate(sorted(loc.items(), key=lambda kv: -kv[1])):
         items.append({"label": k, "value": v, "display": short(v),
                       "note": NOTES[k], "color": PALETTE[i % len(PALETTE)]})
     core = [k for k, _ in sorted(loc.items(), key=lambda kv: -kv[1])
-            if k not in TESTS and k != drop][:4]
+            if k not in tests and k != drop][:4]
     return json.dumps({
         "name": (f"{CFG['slug']}-peel"
                  + ("-big" if card == "big" else "")),
@@ -603,7 +640,7 @@ def peel_spec(loc, total, card="full"):
                 "card": card,
                 "items": items,
                 "peel": [
-                    {"read": TESTS, "drop": TESTS,
+                    {"read": tests, "drop": tests,
                      "gather": [f"{round(100 * (total - s2) / total)}% "
                                 "tests + comments", ""],
                      "title": "code only",

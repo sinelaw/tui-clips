@@ -31,10 +31,10 @@
       "card": "full",
       "items": [
         {
-          "label": "Inline unit tests",
-          "value": 1112029,
-          "display": "1.11M",
-          "note": "mocha suites in a test/ folder beside the code they test",
+          "label": "Tests",
+          "value": 1128346,
+          "display": "1.13M",
+          "note": "unit suites beside the code, and smoke tests over a build",
           "color": [
             74,
             222,
@@ -54,8 +54,8 @@
         },
         {
           "label": "Comments",
-          "value": 406185,
-          "display": "406K",
+          "value": 408450,
+          "display": "408K",
           "note": "every comment line in the repo, tests and code alike",
           "color": [
             251,
@@ -152,25 +152,14 @@
           ]
         },
         {
-          "label": "Integration tests",
-          "value": 18582,
-          "display": "19K",
-          "note": "smoke and integration suites, driving a built application",
-          "color": [
-            74,
-            222,
-            128
-          ]
-        },
-        {
           "label": "Input & keys",
           "value": 16048,
           "display": "16K",
           "note": "keybindings, commands and actions: keys in, actions out",
           "color": [
-            56,
-            189,
-            248
+            74,
+            222,
+            128
           ]
         },
         {
@@ -179,9 +168,9 @@
           "display": "15K",
           "note": "the tunnel and launcher CLI, the one Rust crate here",
           "color": [
-            251,
-            191,
-            36
+            56,
+            189,
+            248
           ]
         },
         {
@@ -190,9 +179,9 @@
           "display": "14K",
           "note": "tokenisation, the theme service, and the colour themes",
           "color": [
-            167,
-            139,
-            250
+            251,
+            191,
+            36
           ]
         },
         {
@@ -201,23 +190,21 @@
           "display": "2.0K",
           "note": "bootstrap files, entry points, odds and ends",
           "color": [
-            244,
-            114,
-            182
+            167,
+            139,
+            250
           ]
         }
       ],
       "peel": [
         {
           "read": [
-            "Integration tests",
-            "Comments",
-            "Inline unit tests"
+            "Tests",
+            "Comments"
           ],
           "drop": [
-            "Integration tests",
-            "Comments",
-            "Inline unit tests"
+            "Tests",
+            "Comments"
           ],
           "gather": [
             "44% tests + comments",
