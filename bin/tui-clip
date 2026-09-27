@@ -283,10 +283,12 @@ def reel(spec: dict, base: str, outdir: str, skip_capture: bool
         path = os.path.join(base, expand(entry["spec"], {}))
         with open(path) as fh:
             scene = json.load(fh)
-        key = entry.get("as", scene["name"])
+        # named for its file, not its `name`: a scene spec's name is chosen
+        # to be unique among clips, and so tends to carry a version's dots
+        key = entry.get("as", os.path.splitext(os.path.basename(path))[0])
         if "." in key:
-            raise SystemExit(f"reel scene name {key!r}: no dots, they "
-                             "separate a scene from its shots")
+            raise SystemExit(f"reel scene name {key!r}: no dots, they separate "
+                             "a scene from its shots; name it with \"as\"")
         if render.mode_of(scene) != "solo":
             raise SystemExit(f"reel scene {key!r} is not a solo clip; a reel "
                              "cuts single screens together")

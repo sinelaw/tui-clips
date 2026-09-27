@@ -571,7 +571,7 @@ def test_reel_namespaces_each_scene_and_cuts_between_them(tmp):
             {"rect": [0, 0, 20, 4], "shot": "card", "head": key},
             {"rect": [0, 4, 20, 8], "view": "top"}],
             views={"top": {"rows": [0, 10]}})
-        sc["name"] = key
+        sc["name"] = f"app-1.2-{key}"      # a name with dots in it
         sc["capture"]["keys"] = [{"shot": "card"}]
         with open(os.path.join(tmp, f"{key}.json"), "w") as fh:
             json.dump(sc, fh)

@@ -988,8 +988,9 @@ take. A **reel** spec lists solo specs instead of filming anything itself:
 }
 ```
 
-Each scene is filmed into `out/<reel>/<scene>/` exactly as it would be on its
-own, and stays renderable on its own. The reel then puts everything a scene
+A scene is named for its spec file (`dialog` above) unless `as` says otherwise.
+Each is filmed into `out/<reel>/<scene>/` exactly as it would be on its own,
+and stays renderable on its own. The reel then puts everything a scene
 took into the scene's namespace -- its final screen is shot `<scene>`, its shot
 `card` is `<scene>.card`, its run `open` is `<scene>.open`, its views likewise
 -- and plays the scenes' beats end to end. A beat that names no `shot` is drawn

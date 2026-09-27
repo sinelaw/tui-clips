@@ -336,8 +336,13 @@ class Session:
             # "JetBrains Mono 21" -> -fa "JetBrains Mono" -fs 21
             m = re.match(r"^(.*?)\s+(\d+(?:\.\d+)?)$", self.font)
             fam, sz = (m.group(1), m.group(2)) if m else (self.font, "14")
+            # Alt as an ESC prefix, the way every other terminal sends it:
+            # xterm's default sets the eighth bit instead, which a TUI reads
+            # as a stray accented letter, so `alt+w` types a character
+            # rather than closing a tab.
             return ["xterm", "-geometry", self.geometry, "-fa", fam,
-                    "-fs", sz, "-b", "0", "-bw", "0", "+sb", "-e", *cmd]
+                    "-fs", sz, "-b", "0", "-bw", "0", "+sb",
+                    "-xrm", "XTerm*metaSendsEscape: true", "-e", *cmd]
         raise CaptureError(f"unknown terminal {self.term!r} "
                            f"(one of {', '.join(self.TERMS)})")
 
@@ -729,6 +734,7 @@ class Session:
 def kill_display(display: str) -> None:
     out = subprocess.run(["pgrep", "-x", "Xvfb"], capture_output=True,
                          text=True).stdout
+    killed = []
     for pid in out.split():
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as fh:
@@ -738,8 +744,23 @@ def kill_display(display: str) -> None:
         if display in argv:
             try:
                 os.kill(int(pid), signal.SIGKILL)
+                killed.append(pid)
             except (ProcessLookupError, ValueError):
                 pass
+    # A SIGKILLed Xvfb cannot clean up after itself: its lock file and socket
+    # stay behind, and the next Xvfb on the same display refuses to start --
+    # which is every other scene of a reel, filmed one after another. Wait for
+    # the process to be gone, then take them away for it.
+    for _ in range(40):
+        if not any(os.path.exists(f"/proc/{pid}") for pid in killed):
+            break
+        time.sleep(0.05)
+    n = display.lstrip(":").split(".")[0]
+    for stale in (f"/tmp/.X{n}-lock", f"/tmp/.X11-unix/X{n}"):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
 
 def report_text(report: dict) -> str:
