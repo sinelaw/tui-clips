@@ -547,6 +547,54 @@ def test_donut_ansi_renders_every_beat(tmp):
           f"the set runs from blank to nearly solid ({ink[0]:.2f}..{ink[-1]:.2f})")
 
 
+def _tui_clip():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    ld = SourceFileLoader("tui_clip", os.path.join(ROOT, "bin", "tui-clip"))
+    mod = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader("tui_clip", ld))
+    ld.exec_module(mod)
+    return mod
+
+
+def test_reel_namespaces_each_scene_and_cuts_between_them(tmp):
+    """a reel is scenes cut together, each filmed as it would be alone"""
+    import json
+    mod = _tui_clip()
+    out = os.path.join(tmp, "out")
+    for key, shift in (("one", 0), ("two", 3)):
+        d = os.path.join(out, key)
+        os.makedirs(os.path.join(d, "shots"))
+        screen(os.path.join(d, "solo.png"), shift=shift)
+        screen(os.path.join(d, "shots", "solo-card.png"), shift=shift + 1)
+        sc = spec_for(tmp, annotations=[
+            {"rect": [0, 0, 20, 4], "shot": "card", "head": key},
+            {"rect": [0, 4, 20, 8], "view": "top"}],
+            views={"top": {"rows": [0, 10]}})
+        sc["name"] = key
+        sc["capture"]["keys"] = [{"shot": "card"}]
+        with open(os.path.join(tmp, f"{key}.json"), "w") as fh:
+            json.dump(sc, fh)
+    reel_spec = {"name": "r",
+                 "reel": ["one.json", {"spec": "two.json",
+                                       "transition": "shatter"}],
+                 "render": spec_for(tmp)["render"]}
+    spec, panes, caps, shots, runs = mod.reel(reel_spec, tmp, out, True)
+    a = spec["render"]["annotations"]
+    check([x["shot"] for x in a] == ["one.card", "one", "two.card", "two"],
+          "each beat names its scene's shot, or the scene's final screen")
+    check(a[1]["view"] == "one.top" and "two.top" in spec["render"]["views"],
+          "views are the scene's own")
+    check(a[2].get("transition") == "shatter" and "transition" not in a[0],
+          "the entry's transition is the cut into it, and the first has none")
+    check(shots["two"].endswith(os.path.join("two", "solo.png")),
+          "a scene's final screen is filmed into its own directory")
+    check(render.mode_of(spec) == "solo", "and the whole renders as a solo clip")
+    r = render.make(spec, caps, os.path.join(tmp, "frames"), shots, runs)
+    check(r.total() > 0 and r.frame(int(r.total() * r.fps) // 2) is not None,
+          "which draws")
+
+
 def test_draft_sizes(tmp):
     """derived, so nobody meets 'width not divisible by 2'"""
     # bin/tui-clip has no .py extension, so it needs its loader naming

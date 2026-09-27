@@ -361,8 +361,11 @@ class Session:
     def launch(self, cmd: list[str]) -> None:
         self.kill_terms()
         time.sleep(1)
+        # xterm has no --working-directory, so the program's cwd is the
+        # terminal's own: start it there, or it films whatever tree this
+        # script was run from.
         subprocess.Popen(self._term_argv(cmd), env=self._child_env(),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         cwd=self.workdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
         time.sleep(self.settle)
         self.wid = self._find_window()

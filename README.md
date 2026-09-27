@@ -966,6 +966,50 @@ screen, since the clip pans vertically over the capture; and park the caret on a
 in a rendered mode, which reads as a rendering flaw to anyone who does not know
 the app.
 
+## A reel: several scenes cut together
+
+A release, a tour, a list of changes: a dozen features a second or so each,
+where every scene needs the program started its own way and so cannot be one
+take. A **reel** spec lists solo specs instead of filming anything itself:
+
+```jsonc
+{
+  "name": "app-1.2",
+  "reel": [
+    "scenes/dialog.json",                          // a path, from this spec
+    {"spec": "scenes/themes.json", "transition": "wipe"},
+    {"spec": "scenes/search.json", "as": "find",   // renames the scene
+     "transition": "shatter",
+     "annotations": [{"rows": [0, 3], "head": "Find"}]}  // replaces its beats
+  ],
+  "render": {"rows": 40, "cols": 80, "title": "app 1.2",
+             "timing": {"intro": 0.5, "zoom": 0.2, "hold": 1.0,
+                        "pan": 0.15, "push": 0.2, "outro": 0.6}}
+}
+```
+
+Each scene is filmed into `out/<reel>/<scene>/` exactly as it would be on its
+own, and stays renderable on its own. The reel then puts everything a scene
+took into the scene's namespace -- its final screen is shot `<scene>`, its shot
+`card` is `<scene>.card`, its run `open` is `<scene>.open`, its views likewise
+-- and plays the scenes' beats end to end. A beat that names no `shot` is drawn
+on its scene's final screen, not the reel's first.
+
+So the cut from one scene to the next is an ordinary beat-to-beat transition,
+drawn by the same code as every other one: a pan by default, or whatever the
+entry's `transition` says (`push`, `wipe`, `shatter`), which overrides the
+first beat's own. The entry carries it so a scene spec need not know where in
+a reel it sits. That is also why **every scene must share one geometry and
+font**: a push carries two screens through one camera. The reel's `render`
+supplies the frame, the timing, the title and the captions; a scene's own are
+ignored, except its `annotations` and `views`.
+
+The pace is the reel's `timing`. A second a scene is fast enough to feel like
+a flythrough and still long enough to read a two-word `head`; drop `sub`,
+which nobody reads at that speed. A scene filmed as a run plays at its filmed
+rate when the beat's `hold` equals the run's `seconds` -- give it half that
+and it plays at double speed.
+
 ## Explode specs
 
 Instead of `annotations`, an explode clip gives `render.explode.pieces` — a
