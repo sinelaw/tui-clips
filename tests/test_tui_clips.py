@@ -547,6 +547,54 @@ def test_donut_ansi_renders_every_beat(tmp):
           f"the set runs from blank to nearly solid ({ink[0]:.2f}..{ink[-1]:.2f})")
 
 
+def _tui_clip():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    ld = SourceFileLoader("tui_clip", os.path.join(ROOT, "bin", "tui-clip"))
+    mod = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader("tui_clip", ld))
+    ld.exec_module(mod)
+    return mod
+
+
+def test_reel_namespaces_each_scene_and_cuts_between_them(tmp):
+    """a reel is scenes cut together, each filmed as it would be alone"""
+    import json
+    mod = _tui_clip()
+    out = os.path.join(tmp, "out")
+    for key, shift in (("one", 0), ("two", 3)):
+        d = os.path.join(out, key)
+        os.makedirs(os.path.join(d, "shots"))
+        screen(os.path.join(d, "solo.png"), shift=shift)
+        screen(os.path.join(d, "shots", "solo-card.png"), shift=shift + 1)
+        sc = spec_for(tmp, annotations=[
+            {"rect": [0, 0, 20, 4], "shot": "card", "head": key},
+            {"rect": [0, 4, 20, 8], "view": "top"}],
+            views={"top": {"rows": [0, 10]}})
+        sc["name"] = f"app-1.2-{key}"      # a name with dots in it
+        sc["capture"]["keys"] = [{"shot": "card"}]
+        with open(os.path.join(tmp, f"{key}.json"), "w") as fh:
+            json.dump(sc, fh)
+    reel_spec = {"name": "r",
+                 "reel": ["one.json", {"spec": "two.json",
+                                       "transition": "shatter"}],
+                 "render": spec_for(tmp)["render"]}
+    spec, panes, caps, shots, runs = mod.reel(reel_spec, tmp, out, True)
+    a = spec["render"]["annotations"]
+    check([x["shot"] for x in a] == ["one.card", "one", "two.card", "two"],
+          "each beat names its scene's shot, or the scene's final screen")
+    check(a[1]["view"] == "one.top" and "two.top" in spec["render"]["views"],
+          "views are the scene's own")
+    check(a[2].get("transition") == "shatter" and "transition" not in a[0],
+          "the entry's transition is the cut into it, and the first has none")
+    check(shots["two"].endswith(os.path.join("two", "solo.png")),
+          "a scene's final screen is filmed into its own directory")
+    check(render.mode_of(spec) == "solo", "and the whole renders as a solo clip")
+    r = render.make(spec, caps, os.path.join(tmp, "frames"), shots, runs)
+    check(r.total() > 0 and r.frame(int(r.total() * r.fps) // 2) is not None,
+          "which draws")
+
+
 def test_draft_sizes(tmp):
     """derived, so nobody meets 'width not divisible by 2'"""
     # bin/tui-clip has no .py extension, so it needs its loader naming
@@ -644,6 +692,34 @@ def test_swipe_replaces_a_row_left_to_right(tmp):
     check(end.getpixel((10, mid_y)) == blue, "after its turn the row is the new screen")
     check(end.getpixel((w - 10, mid_y)) == blue, "... all the way across")
     check(end.getpixel((10, off_y)) == red, "and the unnamed row still is not")
+
+
+def test_a_centered_tag_sits_in_the_middle_of_the_frame(tmp):
+    """`at: center` is the middle of the frame, both ways"""
+    cap = screen(os.path.join(tmp, "a.png"))
+    for at, want in (("center", "mid"), ("center-right", "right")):
+        sp = spec_for(tmp, annotations=[
+            {"rect": [0, 0, 20, 4], "tag": {"text": "Tokyo Night", "at": at}}])
+        r = render.make(sp, {"solo": cap}, os.path.join(tmp, "f"))
+        ov = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+        r.tag(ov, 0, 255, (1080, 1080))
+        x0, y0, x1, y1 = ov.getchannel("A").getbbox()
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        check(abs(cy - 540) < 40, f"{at}: vertically centred ({cy:.0f})")
+        if want == "mid":
+            check(abs(cx - 540) < 20, f"{at}: horizontally centred ({cx:.0f})")
+        else:
+            check(cx > 700, f"{at}: still against the right edge ({cx:.0f})")
+    sp = spec_for(tmp, annotations=[
+        {"rect": [0, 0, 20, 4], "tag": {"text": "Detach", "at": "top-center",
+                                        "y": 0.25}}])
+    r = render.make(sp, {"solo": cap}, os.path.join(tmp, "f"))
+    ov = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+    r.tag(ov, 0, 255, (1080, 1080))
+    x0, y0, x1, y1 = ov.getchannel("A").getbbox()
+    check(abs((y0 + y1) / 2 - 270) < 40, f"y places the words' middle ({(y0 + y1) / 2:.0f})")
+    lines = r.wrap_tag("Orchestrator opens\nas a daemon", r.f_note, 10_000)
+    check(len(lines) == 2, "a newline breaks the line even with room to spare")
 
 
 def test_swipe_staggers_the_rows_it_is_given(tmp):

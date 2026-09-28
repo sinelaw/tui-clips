@@ -168,63 +168,16 @@ def step_argv(step: dict, pane: str, shots_dir: str, ctx: dict) -> list[str]:
     raise SystemExit(f"unknown capture step {step!r}")
 
 
-def draft(spec: dict) -> None:
-    """the same clip at a fraction of the size, for checking the framing.
+def take(spec: dict, outdir: str, skip_capture: bool
+         ) -> tuple[list[str], dict, dict, dict]:
+    """film one spec's panes into `outdir`, or find what an earlier take left.
 
-    Every framing decision -- what a note points at, whether a pane is wide
-    enough, whether two things collide -- is legible at half size, and half
-    size with a fast encode renders in tens of seconds rather than minutes.
-
-    The size is derived rather than left to the caller: libx264 refuses a
-    dimension that is not divisible by two, and a chrome draws at 1/scale of
-    the canvas and needs that to divide as well. Both of those are things a
-    person discovers by hitting them.
+    Returns the panes, the final capture of each, and the named shots and runs
+    the key sequence took. Everything after this reads files, which is what
+    lets `--skip-capture` re-render from a take without re-filming it.
     """
-    r = spec["render"]
-    w, h = r.get("size", [1080, 1080])
-    if r.get("chrome"):
-        # A chrome lays itself out at 1/scale of the canvas and upscales. Halve
-        # the upscale, not the layout: halving the layout would shrink the
-        # window's own type relative to its furniture, which is the one thing
-        # a chrome draft must not change.
-        cs = int(r["chrome"].get("scale", 3))
-        ns = max(1, cs - 1)
-        f = ns / cs
-        r["chrome"] = {**r["chrome"], "scale": ns}
-        step = math.lcm(2, ns)
-    else:
-        f, step = 0.5, 2
-    nw = max(step, int(w * f) // step * step)
-    nh = max(step, int(h * f) // step * step)
-    r["size"] = [nw, nh]
-    r["draft_scale"] = nw / w
-    r["fps"] = min(int(r.get("fps", 60)), 30)
-    spec["encode"] = {"crf": 30, "preset": "ultrafast"}
-    print(f"  draft: {w}x{h} -> {nw}x{nh} at {r['fps']}fps", flush=True)
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("spec")
-    ap.add_argument("--skip-capture", action="store_true")
-    ap.add_argument("--stills", action="store_true")
-    ap.add_argument("--draft", action="store_true",
-                    help="half size, 30fps, fast encode -- for checking the "
-                         "framing before paying for the real render")
-    ap.add_argument("--out")
-    args = ap.parse_args()
-
-    with open(args.spec) as fh:
-        spec = json.load(fh)
-    name = spec["name"]
-    mode = render.mode_of(spec)          # validates the pane set
-    outdir = os.path.join(ROOT, "out", name)
-    frames = os.path.join(outdir, "frames")
     shots_dir = os.path.join(outdir, "shots")
     os.makedirs(outdir, exist_ok=True)
-    if args.draft:
-        draft(spec)
-
     # A donut clip draws its own picture, so there is nothing to film and no
     # terminal to film it in; every stage below that needs a capture is keyed
     # off this being empty rather than off the mode, since "no panes" is the
@@ -232,7 +185,7 @@ def main() -> None:
     panes = list(spec.get("capture", {}).get("panes", {}))
     captures = {p: os.path.join(outdir, f"{p}.png") for p in panes}
 
-    if panes and not args.skip_capture:
+    if panes and not skip_capture:
         # Work on a copy in scratch: many TUIs keep per-directory session state,
         # and we must not disturb whatever the user has open for real.
         scratch = os.path.join(outdir, "scratch")
@@ -299,6 +252,155 @@ def main() -> None:
             raise SystemExit(
                 f"recording {rname!r} produced no frames in "
                 f"{run_dir(rname, panes[0], shots_dir)} (drop --skip-capture?)")
+    return panes, captures, shots, runs
+
+
+def reel(spec: dict, base: str, outdir: str, skip_capture: bool
+         ) -> tuple[dict, list[str], dict, dict, dict]:
+    """film every scene a reel lists, and hand back one solo spec made of them.
+
+    A reel is a run of short solo clips cut together -- a release, a tour, a
+    list of changes -- where each scene needs a program started its own way
+    and so cannot be one take. Each scene is an ordinary solo spec, filmed
+    into `out/<reel>/<scene>/` exactly as it would be on its own, and
+    renderable on its own too. The reel then renames everything a scene
+    took into the scene's namespace -- its final screen is shot `<scene>`,
+    its shot `card` is `<scene>.card`, its run `open` is `<scene>.open` --
+    and concatenates the scenes' beats, so the cut from one scene to the next
+    is an ordinary beat-to-beat transition, drawn by the same code as every
+    other one. That is also why every scene has to share one geometry: a push
+    carries two screens through one camera.
+    """
+    entries = spec["reel"]
+    if not entries:
+        raise SystemExit("reel is empty; nothing to show")
+    r = spec["render"]
+    anns, views = [], dict(r.get("views", {}))
+    first = None
+    shots, runs = {}, {}
+    for entry in entries:
+        entry = {"spec": entry} if isinstance(entry, str) else dict(entry)
+        path = os.path.join(base, expand(entry["spec"], {}))
+        with open(path) as fh:
+            scene = json.load(fh)
+        # named for its file, not its `name`: a scene spec's name is chosen
+        # to be unique among clips, and so tends to carry a version's dots
+        key = entry.get("as", os.path.splitext(os.path.basename(path))[0])
+        if "." in key:
+            raise SystemExit(f"reel scene name {key!r}: no dots, they separate "
+                             "a scene from its shots; name it with \"as\"")
+        if render.mode_of(scene) != "solo":
+            raise SystemExit(f"reel scene {key!r} is not a solo clip; a reel "
+                             "cuts single screens together")
+        sr = scene.get("render", {})
+        for dim in ("rows", "cols"):
+            if int(sr.get(dim, r[dim])) != int(r[dim]):
+                raise SystemExit(
+                    f"reel scene {key!r} has render.{dim}={sr[dim]}, the reel "
+                    f"{r[dim]}; every scene must be filmed at one geometry")
+        print(f"  scene {key}", flush=True)
+        panes, caps, sshots, sruns = take(scene, os.path.join(outdir, key),
+                                          skip_capture)
+        shots[key] = caps[panes[0]]
+        first = first or caps[panes[0]]
+        for n, f in sshots.items():
+            shots[f"{key}.{n}"] = f
+        for n, fs in sruns.items():
+            runs[f"{key}.{n}"] = fs
+        for n, v in sr.get("views", {}).items():
+            views[f"{key}.{n}"] = v
+
+        def ns(name: str) -> str:
+            return f"{key}.{name}"
+        beats = entry.get("annotations", sr.get("annotations"))
+        if not beats:
+            raise SystemExit(f"reel scene {key!r} has no annotations")
+        for i, a in enumerate(beats):
+            a = json.loads(json.dumps(a))
+            if isinstance(a.get("shots"), str):
+                a["shots"] = ns(a["shots"])
+            elif isinstance(a.get("shots"), list):
+                a["shots"] = [ns(n) for n in a["shots"]]
+            a["shot"] = ns(a["shot"]) if a.get("shot") else key
+            if a.get("view"):
+                a["view"] = ns(a["view"])
+            if a.get("swipe", {}).get("to"):
+                a["swipe"]["to"] = ns(a["swipe"]["to"])
+            # the cut into a scene is its first beat's transition; the entry
+            # names it so a scene spec need not know where in a reel it sits
+            if i == 0 and entry.get("transition") and anns:
+                a["transition"] = entry["transition"]
+            anns.append(a)
+    out = {k: v for k, v in spec.items() if k != "reel"}
+    out["capture"] = {"panes": {"reel": {}}}
+    out["render"] = {**r, "annotations": anns, "views": views}
+    return out, ["reel"], {"reel": first}, shots, runs
+
+
+def draft(spec: dict) -> None:
+    """the same clip at a fraction of the size, for checking the framing.
+
+    Every framing decision -- what a note points at, whether a pane is wide
+    enough, whether two things collide -- is legible at half size, and half
+    size with a fast encode renders in tens of seconds rather than minutes.
+
+    The size is derived rather than left to the caller: libx264 refuses a
+    dimension that is not divisible by two, and a chrome draws at 1/scale of
+    the canvas and needs that to divide as well. Both of those are things a
+    person discovers by hitting them.
+    """
+    r = spec["render"]
+    w, h = r.get("size", [1080, 1080])
+    if r.get("chrome"):
+        # A chrome lays itself out at 1/scale of the canvas and upscales. Halve
+        # the upscale, not the layout: halving the layout would shrink the
+        # window's own type relative to its furniture, which is the one thing
+        # a chrome draft must not change.
+        cs = int(r["chrome"].get("scale", 3))
+        ns = max(1, cs - 1)
+        f = ns / cs
+        r["chrome"] = {**r["chrome"], "scale": ns}
+        step = math.lcm(2, ns)
+    else:
+        f, step = 0.5, 2
+    nw = max(step, int(w * f) // step * step)
+    nh = max(step, int(h * f) // step * step)
+    r["size"] = [nw, nh]
+    r["draft_scale"] = nw / w
+    r["fps"] = min(int(r.get("fps", 60)), 30)
+    spec["encode"] = {"crf": 30, "preset": "ultrafast"}
+    print(f"  draft: {w}x{h} -> {nw}x{nh} at {r['fps']}fps", flush=True)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("spec")
+    ap.add_argument("--skip-capture", action="store_true")
+    ap.add_argument("--stills", action="store_true")
+    ap.add_argument("--draft", action="store_true",
+                    help="half size, 30fps, fast encode -- for checking the "
+                         "framing before paying for the real render")
+    ap.add_argument("--out")
+    args = ap.parse_args()
+
+    with open(args.spec) as fh:
+        spec = json.load(fh)
+    name = spec["name"]
+    outdir = os.path.join(ROOT, "out", name)
+    frames = os.path.join(outdir, "frames")
+    os.makedirs(outdir, exist_ok=True)
+    if args.draft:
+        draft(spec)
+
+    if "reel" in spec:
+        spec, panes, captures, shots, runs = reel(
+            spec, os.path.dirname(os.path.abspath(args.spec)), outdir,
+            args.skip_capture)
+    else:
+        render.mode_of(spec)             # validates the pane set
+        panes, captures, shots, runs = take(spec, outdir, args.skip_capture)
+    mode = render.mode_of(spec)
+
     if args.stills:
         if not panes:
             print(f"  {name} films nothing; there are no stills to check")
