@@ -1229,6 +1229,12 @@ class Renderer:
         A single token wider than the column keeps its own line.
         """
         sp = font.getlength(" ")
+        # a newline in the text is a line of its own, however short: the
+        # author's break, for a claim in two parts
+        paras = str(text).split("\n")
+        if len(paras) > 1:
+            return [ln for p in paras
+                    for ln in self.wrap_tag(p, font, max_w, eh)]
         lines, cur, w = [], [], 0.0
         for word in str(text).split():
             if eh and word and not word.isascii():
@@ -1278,7 +1284,12 @@ class Renderer:
         # where there is no edge the eye is already at.
         mid = at == "center" or at.endswith("-center")
         right = not mid and not at.endswith("left")
-        if "top" in at:
+        if t.get("y") is not None:
+            # a share of the frame's height, for the words' middle: the one
+            # place they can go that is neither an edge nor the centre, such
+            # as the strip just above a dialog the beat is about
+            y = int(ch * float(t["y"]) - block_h / 2)
+        elif "top" in at:
             y = pad
         elif "bottom" in at:
             y = ch - pad - block_h

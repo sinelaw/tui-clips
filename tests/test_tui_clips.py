@@ -710,6 +710,16 @@ def test_a_centered_tag_sits_in_the_middle_of_the_frame(tmp):
             check(abs(cx - 540) < 20, f"{at}: horizontally centred ({cx:.0f})")
         else:
             check(cx > 700, f"{at}: still against the right edge ({cx:.0f})")
+    sp = spec_for(tmp, annotations=[
+        {"rect": [0, 0, 20, 4], "tag": {"text": "Detach", "at": "top-center",
+                                        "y": 0.25}}])
+    r = render.make(sp, {"solo": cap}, os.path.join(tmp, "f"))
+    ov = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+    r.tag(ov, 0, 255, (1080, 1080))
+    x0, y0, x1, y1 = ov.getchannel("A").getbbox()
+    check(abs((y0 + y1) / 2 - 270) < 40, f"y places the words' middle ({(y0 + y1) / 2:.0f})")
+    lines = r.wrap_tag("Orchestrator opens\nas a daemon", r.f_note, 10_000)
+    check(len(lines) == 2, "a newline breaks the line even with room to spare")
 
 
 def test_swipe_staggers_the_rows_it_is_given(tmp):

@@ -722,7 +722,11 @@ column, and draws no leader at all:
 
 `at` is `center|top|bottom` crossed with `left|right|center` (default
 `center-right`; `center` alone is the middle of the frame, for a beat about
-the whole screen rather than one edge of it), `width` is the wrapping column as a share of the frame, and
+the whole screen rather than one edge of it), A `\n` in the text starts a new line wherever the column would not have.
+`y`, when given, overrides the vertical half of `at`: the share of the
+frame's height the words' middle sits at, for a place that is neither an edge
+nor the centre -- the strip above a dialog, say. `width` is the wrapping
+column as a share of the frame, and
 `size` overrides `render.note_size`. `color` and `bg` each take a theme key
 (`after`, `fg`, `bg`, …) or an explicit `[r, g, b]`; `bg: true` uses the
 theme's ground.
