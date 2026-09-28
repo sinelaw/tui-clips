@@ -694,6 +694,24 @@ def test_swipe_replaces_a_row_left_to_right(tmp):
     check(end.getpixel((10, off_y)) == red, "and the unnamed row still is not")
 
 
+def test_a_centered_tag_sits_in_the_middle_of_the_frame(tmp):
+    """`at: center` is the middle of the frame, both ways"""
+    cap = screen(os.path.join(tmp, "a.png"))
+    for at, want in (("center", "mid"), ("center-right", "right")):
+        sp = spec_for(tmp, annotations=[
+            {"rect": [0, 0, 20, 4], "tag": {"text": "Tokyo Night", "at": at}}])
+        r = render.make(sp, {"solo": cap}, os.path.join(tmp, "f"))
+        ov = Image.new("RGBA", (1080, 1080), (0, 0, 0, 0))
+        r.tag(ov, 0, 255, (1080, 1080))
+        x0, y0, x1, y1 = ov.getchannel("A").getbbox()
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        check(abs(cy - 540) < 40, f"{at}: vertically centred ({cy:.0f})")
+        if want == "mid":
+            check(abs(cx - 540) < 20, f"{at}: horizontally centred ({cx:.0f})")
+        else:
+            check(cx > 700, f"{at}: still against the right edge ({cx:.0f})")
+
+
 def test_swipe_staggers_the_rows_it_is_given(tmp):
     """rows go one after another, in the order listed, not all at once."""
     a = solid(os.path.join(tmp, "a.png"), (200, 0, 0))

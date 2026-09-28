@@ -1246,7 +1246,7 @@ class Renderer:
         return lines
 
     def tag(self, ov, i: int, alpha: int, size) -> None:
-        """beat i's tag, set against an edge of the frame"""
+        """beat i's tag, set against an edge of the frame, or in its middle"""
         a = self.ann[i]
         t = a.get("tag")
         if not t or alpha <= 4:
@@ -1273,7 +1273,11 @@ class Renderer:
 
         def line_w(toks):
             return sum(k[2] for k in toks) + sp * max(0, len(toks) - 1)
-        right = not at.endswith("left")
+        # `center` alone, or `top-center` / `bottom-center`, sets the words
+        # in the middle of the frame: for a beat about the whole screen,
+        # where there is no edge the eye is already at.
+        mid = at == "center" or at.endswith("-center")
+        right = not mid and not at.endswith("left")
         if "top" in at:
             y = pad
         elif "bottom" in at:
@@ -1283,7 +1287,8 @@ class Renderer:
         ld = ImageDraw.Draw(ov)
         fill = fade_c(self.tone_of(t.get("color"), self.th.get("fg")), alpha)
         widest = max((line_w(l) for l in lines), default=0)
-        x0 = (cw - pad - widest) if right else pad
+        x0 = ((cw - widest) / 2 if mid else
+              (cw - pad - widest) if right else pad)
 
         # `bg` gives the words something to sit on. Over a screen that is
         # itself text, a fill is what separates one from the other -- a
@@ -1304,7 +1309,8 @@ class Renderer:
         sw = 0 if bg else self.k(4)
         stroke = fade_c(self.th["bg"], alpha)
         for n, toks in enumerate(lines):
-            x = (cw - pad - line_w(toks)) if right else pad
+            x = ((cw - line_w(toks)) / 2 if mid else
+                 (cw - pad - line_w(toks)) if right else pad)
             ly = y + n * step
             for kind, word, tw in toks:
                 if kind == "e":

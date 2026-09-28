@@ -720,8 +720,9 @@ column, and draws no leader at all:
          "width": 0.40, "size": 58, "color": "after", "bg": true}}
 ```
 
-`at` is `center|top|bottom` crossed with `left|right` (default
-`center-right`), `width` is the wrapping column as a share of the frame, and
+`at` is `center|top|bottom` crossed with `left|right|center` (default
+`center-right`; `center` alone is the middle of the frame, for a beat about
+the whole screen rather than one edge of it), `width` is the wrapping column as a share of the frame, and
 `size` overrides `render.note_size`. `color` and `bg` each take a theme key
 (`after`, `fg`, `bg`, …) or an explicit `[r, g, b]`; `bg: true` uses the
 theme's ground.
