@@ -971,6 +971,54 @@ def test_explode_counts_in_seconds_and_can_start_already_open(tmp):
     check(r.explode_at(1, 0.0) == 1.0, "`over: 0` starts open, for a beat that holds one")
 
 
+
+def test_kitty_is_set_from_the_spec_alone(tmp):
+    """kitty films the spec's geometry and font, with nothing from the
+    machine's own kitty.conf, and maps Nerd Font icons only to a font that is
+    actually installed"""
+    s = cap.Session(geometry="86x28", font="JetBrains Mono 26", term="kitty",
+                    workdir=tmp)
+    real = cap.has_font
+    try:
+        cap.has_font = lambda family: True
+        argv = s._term_argv(["prog", "arg"])
+        cap.has_font = lambda family: False
+        bare = s._term_argv(["prog", "arg"])
+    finally:
+        cap.has_font = real
+    check(argv[:3] == ["kitty", "--config", "NONE"], "no kitty.conf is read")
+    check(argv[argv.index("--class") + 1] == cap.KITTY_CLASS,
+          "its own window class, so the window it finds is its own")
+    check(argv[argv.index("--directory") + 1] == tmp, "starts in the workdir")
+    opts = [argv[i + 1] for i, a in enumerate(argv) if a == "-o"]
+    check("initial_window_width=86c" in opts and "initial_window_height=28c" in opts,
+          "the window is the spec's geometry, in cells")
+    check("font_family=JetBrains Mono" in opts and "font_size=26" in opts,
+          "the spec's font, split into family and size")
+    check(any(o.startswith("symbol_map ") and o.endswith(cap.NERD_SYMBOLS) for o in opts),
+          "Nerd Font icons go to the symbols font when it is installed")
+    check(not any(o.startswith("symbol_map ") for o in
+                  [bare[i + 1] for i, a in enumerate(bare) if a == "-o"]),
+          "... and are left alone when it is not")
+    check(argv[-2:] == ["prog", "arg"], "the program comes last, as given")
+    n = cap.Session(geometry="86x28", font="JetBrainsMono Nerd Font Mono 26",
+                    term="kitty", workdir=tmp)
+    try:
+        cap.has_font = lambda family: True
+        nerd = n._term_argv(["prog"])
+    finally:
+        cap.has_font = real
+    nopts = [nerd[i + 1] for i, a in enumerate(nerd) if a == "-o"]
+    check("font_family=JetBrainsMono Nerd Font Mono" in nopts and
+          not any(o.startswith("symbol_map ") for o in nopts),
+          "a Nerd Font keeps its own icons")
+    check(s._child_env().get("LIBGL_ALWAYS_SOFTWARE") == "1",
+          "kitty gets Mesa's software renderer: Xvfb has no GPU")
+    x = cap.Session(geometry="86x28", term="xterm", workdir=tmp)
+    check("LIBGL_ALWAYS_SOFTWARE" not in x._child_env() or
+          os.environ.get("LIBGL_ALWAYS_SOFTWARE") is not None,
+          "... and only kitty does")
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

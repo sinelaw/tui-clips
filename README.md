@@ -7,7 +7,7 @@ rather than a screen, a donut the camera reads one section at a time.
 
 ## Quick start
 
-Needs `Xvfb`, a terminal (`xfce4-terminal` or `xterm`), `xdotool`, `xwd`
+Needs `Xvfb`, a terminal (`xfce4-terminal`, `xterm` or `kitty`), `xdotool`, `xwd`
 (from `x11-apps`), `ffmpeg`, and Python with Pillow. ImageMagick is optional —
 only the `import` backend uses it. Runs headless: no X session, and nothing
 touches the terminal or editor you have open.
@@ -342,6 +342,21 @@ box-drawing glyphs as latin-1 renders every one as about three columns and
 wraps every line that has any; the failure is silent and looks exactly like a
 layout bug in the program you are filming. `"locale"` overrides it.
 
+`"term": "kitty"` films the program the way most people now see a modern TUI:
+24-bit colour, and box drawing, block elements and Powerline separators drawn
+by kitty itself to the cell's exact pixels instead of taken from the font, so
+lines meet and rounded corners are round. It is started with `--config NONE`,
+so a `kitty.conf` on the filming machine cannot change the clip, with the
+spec's geometry in cells and the spec's font. For a program that draws Nerd
+Font icons, give it a Nerd Font, e.g. `"font": "JetBrainsMono Nerd Font Mono
+21"`, and the icons match the letters. With any other font, when fontconfig
+knows `Symbols Nerd Font Mono` the icon ranges are mapped to it, so the icons
+still come out as the program drew them. Under Xvfb
+kitty renders with Mesa's software OpenGL; `LIBGL_ALWAYS_SOFTWARE=1` is set
+for it. Where it was added, `tui-probe --term kitty` measured `xwd` at 5.9ms
+a frame against 33.9ms for `import`, an `x11grab` recording that saw the
+motion (27 distinct frames for 26 steps), and no backlog.
+
 **Set the scene through the program's own API, not through its UI.** Cutting
 four git worktrees through the orchestrator's dialogs would have been about
 forty keystrokes, forty chances to desync, and not one of them the thing the
@@ -434,7 +449,7 @@ the dimmed bands, the captions, the outro — is identical.
     "screen": "1600x2200x24",         // must exceed the terminal window
     "display": ":99",
     "settle": 8,                      // seconds to wait for the first paint
-    "term": "xfce4-terminal",         // or "xterm"
+    "term": "xfce4-terminal",         // or "xterm", or "kitty"
     "backend": "xwd",                 // or "import", or "x11grab"; see above
     "grab_fps": 30,                   // continuous grab rate; 0 grabs flat out
     "key_settle": 0.12,               // pause after a key; 1.2 under x11grab
