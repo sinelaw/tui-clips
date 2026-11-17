@@ -233,10 +233,27 @@ def trim(run: Run, grab: Grabber) -> list[float]:
 # the session
 # ---------------------------------------------------------------------------
 
+# kitty draws Nerd Font icons from a separate symbols font when it is told to:
+# this is the font, and the Private Use ranges its icons live in.
+NERD_SYMBOLS = "Symbols Nerd Font Mono"
+NERD_RANGES = "U+E000-U+F8FF,U+F0000-U+FFFFD"
+KITTY_CLASS = "TuiClipsKitty"
+
+
+def has_font(family: str) -> bool:
+    """whether fontconfig knows a font family by exactly this name"""
+    try:
+        out = subprocess.run(["fc-list", ":", "family"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(family in line.split(",") for line in out.splitlines())
+
+
 class Session:
     """an Xvfb, a terminal on it, and a camera that never stops asking"""
 
-    TERMS = ("xfce4-terminal", "xterm")
+    TERMS = ("xfce4-terminal", "xterm", "kitty")
 
     def __init__(self, display=":99", screen="1600x2200x24", geometry="80x24",
                  font="JetBrains Mono 21", workdir=None, settle=8.0,
@@ -295,6 +312,10 @@ class Session:
             e.setdefault("LANG", self.locale)
             e["LANG"] = self.env.get("LANG", self.locale)
             e["LC_ALL"] = self.env.get("LC_ALL", self.locale)
+        if self.term == "kitty":
+            # kitty draws with OpenGL, and Xvfb has no GPU: Mesa's software
+            # renderer is what makes it start at all.
+            e.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         e.update(self.env)
         return e
 
@@ -343,14 +364,38 @@ class Session:
             return ["xterm", "-geometry", self.geometry, "-fa", fam,
                     "-fs", sz, "-b", "0", "-bw", "0", "+sb",
                     "-xrm", "XTerm*metaSendsEscape: true", "-e", *cmd]
+        if self.term == "kitty":
+            m = re.match(r"^(.*?)\s+(\d+(?:\.\d+)?)$", self.font)
+            fam, sz = (m.group(1), m.group(2)) if m else (self.font, "14")
+            # `--config NONE`: a kitty.conf on the machine doing the filming
+            # must not change the clip. Everything that matters is set here,
+            # the window in cells, so the geometry is the spec's exactly.
+            opts = [f"font_family={fam}", f"font_size={sz}",
+                    f"initial_window_width={self.cols}c",
+                    f"initial_window_height={self.rows}c",
+                    "window_padding_width=0", "remember_window_size=no",
+                    "placement_strategy=top-left", "cursor_blink_interval=0",
+                    "enable_audio_bell=no", "confirm_os_window_close=0",
+                    "disable_ligatures=always"]
+            # Nerd Font icons: a Nerd Font has its own, drawn to match its
+            # letters; for any other font kitty takes them from the symbols
+            # font when it is installed, not from whatever has the glyph.
+            if "Nerd Font" not in fam and has_font(NERD_SYMBOLS):
+                opts.append(f"symbol_map {NERD_RANGES} {NERD_SYMBOLS}")
+            argv = ["kitty", "--config", "NONE", "--class", KITTY_CLASS,
+                    "--directory", self.workdir]
+            for o in opts:
+                argv += ["-o", o]
+            return argv + list(cmd)
         raise CaptureError(f"unknown terminal {self.term!r} "
                            f"(one of {', '.join(self.TERMS)})")
 
     def kill_terms(self) -> None:
         # Never `pkill -f`: the pattern can match the shell running this and
         # take the capture out along with the target. Match, then kill by pid.
-        pat = ("xfce4-terminal --disable-server" if self.term == "xfce4-terminal"
-               else None)
+        pat = {"xfce4-terminal": "xfce4-terminal --disable-server",
+               # anchored: only a kitty this tool started, never another one
+               "kitty": f"^kitty --config NONE --class {KITTY_CLASS}"}.get(self.term)
         if pat:
             out = subprocess.run(["pgrep", "-f", pat], capture_output=True,
                                  text=True).stdout
@@ -382,8 +427,9 @@ class Session:
         self.cw, self.ch = self.w / self.cols, self.h / self.rows
 
     def _find_window(self) -> str:
-        sel = (["search", "--name", "Terminal - "] if self.term == "xfce4-terminal"
-               else ["search", "--class", "XTerm"])
+        sel = {"xfce4-terminal": ["search", "--name", "Terminal - "],
+               "kitty": ["search", "--class", KITTY_CLASS]}.get(
+                   self.term, ["search", "--class", "XTerm"])
         out = subprocess.run(["xdotool", *sel], env=self._child_env(),
                              capture_output=True, text=True).stdout.split()
         if not out:
