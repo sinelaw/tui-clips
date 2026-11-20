@@ -1009,6 +1009,14 @@ def test_a_fixed_camera_explode_moves_only_at_the_end(tmp):
     w = lambda c: c[2] - c[0]
     check(w(tl[-1]["cam1"]) > w(first) * 2, "and it ends on the whole screen")
 
+    # with `zoom_in`, it opens on the whole screen and goes straight in
+    spec["render"]["timing"] = {**spec["render"].get("timing", {}), "zoom_in": 0.5}
+    tl = render.make(spec, {"solo": a}, os.path.join(tmp, "f")).timeline
+    check(w(tl[0]["cam0"]) > w(first) * 2 and tl[0]["cam1"] == first,
+          "zoom_in opens on the whole screen and ends on the fixed framing")
+    check(all(sg["cam0"] == sg["cam1"] == first for sg in tl[1:-2]),
+          "and from there the camera holds until the outro")
+
 
 def test_an_explode_can_let_siblings_linger(tmp):
     """`aside: 1` keeps a piece's siblings at full strength as it opens.

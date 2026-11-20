@@ -2625,6 +2625,12 @@ class ExplodeRenderer(Furniture):
         if self.fixed_camera:
             for sg in segs:
                 sg["cam0"] = sg["cam1"] = first
+            # optionally, in from the whole screen first: the clip opens on
+            # all of it and goes straight in to the framing it then keeps
+            if T.get("zoom_in", 0) > 0:
+                seg("intro", T["zoom_in"], whole, first,
+                    head=self.cap_intro[0], sub=self.cap_intro[1])
+                segs.insert(0, segs.pop())
             # the one camera move: out to the whole screen, once it is whole
             # again, then a hold on it
             outro = segs.pop()

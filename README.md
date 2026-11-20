@@ -1094,7 +1094,9 @@ panel whose content fills only its top can be shown close rather than whole:
 With `"camera": "fixed"` beside `open_on`, the camera holds that opening
 framing through every beat: the piece keeps its size and place while the rest
 of the screen comes apart round it, and the clip's one camera move is at the
-end, out to the whole screen (`zoom_out`, then the `outro` hold). Offsets have
+end, out to the whole screen (`zoom_out`, then the `outro` hold). A `zoom_in`
+timing opens the clip on the whole screen instead and goes straight in to that
+framing first. Offsets have
 to keep what matters inside the frame, so deal a list's rows downward from its
 top (an `offset` of `[0, i * gap]` each) rather than fanning them round its
 middle.
