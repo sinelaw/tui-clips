@@ -1042,6 +1042,32 @@ def test_an_explode_can_let_siblings_linger(tmp):
     check(kept[2] > faded[2] + 60, f"kept, the sibling is still there ({kept} vs {faded})")
 
 
+def test_an_explode_can_draw_no_outlines(tmp):
+    """`outline: false` lifts a piece without the wireframe round it."""
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (0, 0, 200),
+               (0, 0, 1, 1))
+    pieces = [{"rows": [5, 10], "cols": [10, 30], "label": "", "offset": [0, 4]}]
+
+    def outline_pixels(**ex):
+        spec = spec_for(tmp, header_height=0, caption_height=0,
+                        explode={"pieces": pieces, "dim": 0.0, **ex})
+        r = render.make(spec, {"solo": a}, os.path.join(tmp, "f"))
+        acc = 0.0
+        for sg in r.timeline:
+            acc += sg["dur"]
+            if sg["kind"] == "explode":
+                break
+        return r.frame(int(acc * r.fps) - 1).convert("RGB")
+
+    on, off = outline_pixels(), outline_pixels(outline=False)
+    diff = ImageChops.difference(on, off).convert("L").point(lambda v: 255 if v > 30 else 0)
+    box = diff.getbbox()
+    check(box is not None, "the outline is drawn by default and not with outline off")
+    # what differs is a frame round the lifted piece, not the piece itself
+    inside = diff.crop((box[0] + 4, box[1] + 4, box[2] - 4, box[3] - 4)).getbbox() if box else None
+    check(inside is None, f"and it is only the outline that differs ({box}, {inside})")
+
+
 def test_explode_dims_what_it_did_not_lift(tmp):
     """the pieces are what the eye lands on, so everything else falls back."""
     a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),

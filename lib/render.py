@@ -2438,6 +2438,9 @@ class ExplodeRenderer(Furniture):
         # how far whatever is out of focus is darkened during a beat
         self.aside = float(ex.get("aside", ASIDE))
         self.dim = float(ex.get("dim", 0.55))
+        # the wireframe drawn round each lifted piece; off, a piece is only
+        # its own pixels
+        self.outline = bool(ex.get("outline", True))
         if self.open_on is not None and self.open_on not in self.by_path:
             raise SystemExit(f"render.explode.open_on {list(self.open_on)} names no piece")
 
@@ -2704,7 +2707,7 @@ class ExplodeRenderer(Furniture):
                 continue
             box = self._paint(cv, p.src, dest, a, self.dim * (1.0 - lit) * e,
                               p.holes)
-            if box and e > 0.06:
+            if box and e > 0.06 and self.outline:
                 self._outline(d, box, lit, a * e)
             if p.label and e > 0.10:
                 labels.append((p, dest, a * e, lit))
