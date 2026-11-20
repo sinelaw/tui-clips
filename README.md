@@ -1066,8 +1066,24 @@ list.
 same-shaped rows apart radially just piles them up along one axis, whereas
 dealing each one a little further along than the last opens them into a fan.
 
+A fan also makes its group taller, and a dive frames the whole opened group,
+so the camera pulls back to fit it and every piece in it draws smaller — a list
+of full-width rows reads as rows growing narrower as they come apart. Give the
+piece `"dive_frame": "keep"` and its dive keeps the zoom the camera already had
+instead, panning to the group's top: the rows stay the width they were, and a
+fan taller than the view runs off the bottom.
+
+```jsonc
+{"rows": [4, 22], "cols": [0, 38], "stagger": [0, 0.8],
+ "dive_frame": "keep",           // pan, don't pull back
+ "survey": 1.4,                  // this piece's own pause once open
+ "pieces": [ ... ]}
+```
+
 Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
-`regroup`, `implode`, `outro`. Set any to `0` to drop that beat.
+`regroup`, `implode`, `outro`. Set any to `0` to drop that beat; a piece's own
+`survey` overrides the global one for the pause after it opens, so a clip can
+run without pauses and still stop where it means to.
 
 ## Where the rects come from
 

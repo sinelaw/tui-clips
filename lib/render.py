@@ -2324,6 +2324,14 @@ class Piece:
         # a container that has children says what to call the moment it opens
         self.dive_head = d.get("dive_head", "")
         self.dive_sub = d.get("dive_sub", "")
+        # How the camera frames this piece's children once it opens: "fit"
+        # re-frames to the whole opened group, zooming out as far as a wide
+        # fan needs; "keep" holds the zoom the camera already had and pans to
+        # the group's top, so the pieces stay the size they were and a fan
+        # taller than the view runs off the bottom.
+        self.dive_frame = d.get("dive_frame", "fit")
+        # this piece's own pause once open, in place of `timing.survey`
+        self.survey = d.get("survey")
 
         if "offset" in d:
             self.off = (float(d["offset"][0]), float(d["offset"][1]))
@@ -2457,6 +2465,17 @@ class ExplodeRenderer(Furniture):
         return _union(rects)
 
     # -- camera -------------------------------------------------------------
+    def _pan_to(self, cam, closed, box):
+        """`cam`'s size over the opened group `box`: a pan that keeps the zoom.
+
+        Centred across; down, the group's top keeps the margin `cam` left
+        above the piece while it was `closed`, so what does not fit goes off
+        the bottom."""
+        w, h = cam[2] - cam[0], cam[3] - cam[1]
+        cx = (box[0] + box[2]) / 2
+        top = box[1] - (closed[1] - cam[1])
+        return (cx - w / 2, top, cx + w / 2, top + h)
+
     def _frame_rect(self, box, context: float):
         """grow `box` to the viewport's aspect, then leave room around it"""
         x0, y0, x1, y1 = box
@@ -2541,12 +2560,16 @@ class ExplodeRenderer(Furniture):
                 if p.children:
                     lv_in = self._levels(cp)     # ... and now this piece's own
                     inner = dive_framed(cp, lv_in)
+                    if p.dive_frame == "keep":
+                        inner = self._pan_to(cam, self.world(cp, lv),
+                                             self.group_box(cp, lv_in))
                     dh = p.dive_head or p.head
                     ds = p.dive_sub or p.sub
                     seg("dive", T["dive"], cam, inner, focus=cp,
                         head=dh, sub=ds,
                         lv0=self._levels(cp, 0.0), lv1=lv_in)
-                    seg("survey", T["survey"], inner, inner, focus=cp,
+                    seg("survey", T["survey"] if p.survey is None else p.survey,
+                        inner, inner, focus=cp,
                         head=dh, sub=ds, lv0=lv_in)
                     walk(p.children, cp, inner)
                     seg("rise", T["rise"], inner, cam, focus=cp,

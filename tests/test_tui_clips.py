@@ -928,6 +928,35 @@ def test_explode_lifts_a_named_rect_and_leaves_ground(tmp):
     check(end.getpixel((10, 300)) == blue, "the rest of the screen is untouched")
 
 
+def test_an_explode_dive_can_keep_its_zoom(tmp):
+    """a fanned list opened with `dive_frame: keep` is not drawn any smaller.
+
+    A dive frames the whole opened group, so a fan that makes it taller pulls
+    the camera back and every row in it draws narrower -- full-width rows read
+    as rows shrinking as they come apart. `keep` holds the zoom and pans to
+    the group's top instead; the rows that do not fit go off the bottom.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    rows = [{"rows": [i, i + 1], "cols": [0, 30], "label": ""} for i in range(2, 18)]
+
+    def dive_widths(frame):
+        pieces = [{"rows": [2, 18], "cols": [0, 30], "label": "", "head": " ",
+                   "stagger": [0, 0.8], "pieces": rows, **frame}]
+        spec = spec_for(tmp, header_height=0, caption_height=0,
+                        explode={"pieces": pieces})
+        r = render.make(spec, {"solo": a}, os.path.join(tmp, "f"))
+        d = next(s for s in r.timeline if s["kind"] == "dive")
+        return d["cam0"][2] - d["cam0"][0], d["cam1"][2] - d["cam1"][0], d, r
+
+    w0, w1, _, _ = dive_widths({})
+    check(w1 > w0 * 1.2, f"by default the dive pulls back to fit the fan ({w0:.1f} -> {w1:.1f})")
+    w0, w1, d, r = dive_widths({"dive_frame": "keep"})
+    check(abs(w1 - w0) < 1e-6, f"kept, the zoom does not change ({w0:.1f} -> {w1:.1f})")
+    top = r.group_box((0,), r._levels((0,)))[1]
+    check(d["cam1"][1] < top < d["cam1"][3], "and the opened list's top is in view")
+
+
 def test_explode_dims_what_it_did_not_lift(tmp):
     """the pieces are what the eye lands on, so everything else falls back."""
     a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
