@@ -2429,6 +2429,10 @@ class ExplodeRenderer(Furniture):
         # Open on one piece rather than on the whole screen: the path of its
         # indices down the tree, e.g. [0] for the first top-level piece.
         self.open_on = tuple(ex["open_on"]) if ex.get("open_on") is not None else None
+        # "fixed": the camera holds the opening framing through every beat,
+        # so what it opened on keeps its size and place while the rest comes
+        # apart round it, and only the outro moves, out to the whole screen
+        self.fixed_camera = ex.get("camera") == "fixed"
         if self.open_on is not None and self.open_on not in self.by_path:
             raise SystemExit(f"render.explode.open_on {list(self.open_on)} names no piece")
 
@@ -2610,6 +2614,16 @@ class ExplodeRenderer(Furniture):
             lv0=open_root, lv1={})
         seg("outro", T["outro"], whole, whole,
             head=self.cap_outro[0], sub=self.cap_outro[1])
+        if self.fixed_camera:
+            for sg in segs:
+                sg["cam0"] = sg["cam1"] = first
+            # the one camera move: out to the whole screen, once it is whole
+            # again, then a hold on it
+            outro = segs.pop()
+            seg("outro", T.get("zoom_out", T["outro"]), first, whole,
+                head=outro["head"], sub=outro["sub"])
+            seg("outro", T["outro"], whole, whole,
+                head=outro["head"], sub=outro["sub"])
         return segs
 
     def total(self) -> float:

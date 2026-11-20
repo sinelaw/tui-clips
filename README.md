@@ -1091,6 +1091,14 @@ panel whose content fills only its top can be shown close rather than whole:
   {"rows": [0, 36], "cols": [0, 39], "view_rows": [0, 23], ...}]}
 ```
 
+With `"camera": "fixed"` beside `open_on`, the camera holds that opening
+framing through every beat: the piece keeps its size and place while the rest
+of the screen comes apart round it, and the clip's one camera move is at the
+end, out to the whole screen (`zoom_out`, then the `outro` hold). Offsets have
+to keep what matters inside the frame, so deal a list's rows downward from its
+top (an `offset` of `[0, i * gap]` each) rather than fanning them round its
+middle.
+
 Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
 `regroup`, `implode`, `outro`. Set any to `0` to drop that beat; a piece's own
 `survey` overrides the global one for the pause after it opens, so a clip can

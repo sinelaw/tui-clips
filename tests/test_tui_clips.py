@@ -987,6 +987,29 @@ def test_an_explode_can_open_close_on_one_piece(tmp):
           f"already on the piece, its first beat has no move ({kinds[:3]})")
 
 
+def test_a_fixed_camera_explode_moves_only_at_the_end(tmp):
+    """`camera: fixed` holds the opening framing until the zoom out.
+
+    What the clip opens on keeps its size and place while the rest comes apart
+    round it; the only camera move is the outro's, out to the whole screen.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    kids = [{"rows": [i, i + 1], "cols": [0, 15], "label": "", "offset": [0, i * 0.5]}
+            for i in range(2, 8)]
+    pieces = [{"rows": [0, 20], "cols": [0, 15], "label": "", "head": " ",
+               "view_rows": [0, 10], "pieces": kids},
+              {"rows": [0, 20], "cols": [15, 60], "label": "", "offset": [8, 0]}]
+    spec = spec_for(tmp, header_height=0, caption_height=0,
+                    explode={"pieces": pieces, "open_on": [0], "camera": "fixed"})
+    tl = render.make(spec, {"solo": a}, os.path.join(tmp, "f")).timeline
+    first = tl[0]["cam0"]
+    moving = [s["kind"] for s in tl if s["cam0"] != first or s["cam1"] != first]
+    check(moving[:1] == ["outro"], f"only the outro leaves the opening framing ({moving})")
+    w = lambda c: c[2] - c[0]
+    check(w(tl[-1]["cam1"]) > w(first) * 2, "and it ends on the whole screen")
+
+
 def test_explode_dims_what_it_did_not_lift(tmp):
     """the pieces are what the eye lands on, so everything else falls back."""
     a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
