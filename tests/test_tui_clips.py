@@ -1010,6 +1010,38 @@ def test_a_fixed_camera_explode_moves_only_at_the_end(tmp):
     check(w(tl[-1]["cam1"]) > w(first) * 2, "and it ends on the whole screen")
 
 
+def test_an_explode_can_let_siblings_linger(tmp):
+    """`aside: 1` keeps a piece's siblings at full strength as it opens.
+
+    By default they fade almost away, which reads as the rest of the screen
+    leaving; a clip that keeps one camera wants them to stay and only step
+    aside as far as their offsets take them.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    kids = [{"rows": [i, i + 1], "cols": [0, 15], "label": "", "offset": [0, i * 0.5]}
+            for i in range(2, 8)]
+    pieces = [{"rows": [0, 20], "cols": [0, 15], "label": "", "head": " ", "pieces": kids},
+              {"rows": [0, 20], "cols": [15, 60], "label": "", "offset": [1, 0]}]
+
+    def sibling_at_dive_end(**ex):
+        spec = spec_for(tmp, header_height=0, caption_height=0,
+                        explode={"pieces": pieces, "open_on": [0], "camera": "fixed", **ex})
+        r = render.make(spec, {"solo": a}, os.path.join(tmp, "f"))
+        acc = 0.0
+        for sg in r.timeline:
+            acc += sg["dur"]
+            if sg["kind"] == "dive":
+                break
+        im = r.frame(int(acc * r.fps) - 1)
+        # the sibling's blue ground, a little right of the opened piece
+        return im.getpixel((int(im.width * 0.97), im.height // 2))
+
+    faded = sibling_at_dive_end()
+    kept = sibling_at_dive_end(aside=1.0, dim=0.0)
+    check(kept[2] > faded[2] + 60, f"kept, the sibling is still there ({kept} vs {faded})")
+
+
 def test_explode_dims_what_it_did_not_lift(tmp):
     """the pieces are what the eye lands on, so everything else falls back."""
     a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),

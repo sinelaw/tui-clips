@@ -1099,6 +1099,12 @@ to keep what matters inside the frame, so deal a list's rows downward from its
 top (an `offset` of `[0, i * gap]` each) rather than fanning them round its
 middle.
 
+When a piece opens its siblings fade nearly away (`aside`, default `0.09`),
+and during a beat whatever is out of focus is darkened (`dim`, default
+`0.55`). With a fixed camera that reads as the rest of the screen leaving;
+`"aside": 1` keeps them at full strength, so they linger and only step aside
+as far as their offsets take them, and a lower `dim` keeps the focus light.
+
 Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
 `regroup`, `implode`, `outro`. Set any to `0` to drop that beat; a piece's own
 `survey` overrides the global one for the pause after it opens, so a clip can

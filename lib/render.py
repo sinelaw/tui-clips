@@ -2433,6 +2433,11 @@ class ExplodeRenderer(Furniture):
         # so what it opened on keeps its size and place while the rest comes
         # apart round it, and only the outro moves, out to the whole screen
         self.fixed_camera = ex.get("camera") == "fixed"
+        # how far a piece's siblings fade as it opens (1 = not at all: they
+        # linger, stepping aside only as far as their offsets take them), and
+        # how far whatever is out of focus is darkened during a beat
+        self.aside = float(ex.get("aside", ASIDE))
+        self.dim = float(ex.get("dim", 0.55))
         if self.open_on is not None and self.open_on not in self.by_path:
             raise SystemExit(f"render.explode.open_on {list(self.open_on)} names no piece")
 
@@ -2688,7 +2693,7 @@ class ExplodeRenderer(Furniture):
             dest = self._to_canvas(_shift(p.src, poff), cam)
             q = levels.get(p.path, 0.0)
             # a sibling of whatever is being taken apart steps out of the way
-            a = amult * (1.0 - (1.0 - ASIDE) * (opening - q if q < opening else 0.0))
+            a = amult * (1.0 - (1.0 - self.aside) * (opening - q if q < opening else 0.0))
             lit = self._lit(p.path, focus)
             if q > 0.0:
                 # this piece is (or is becoming) a container: what is left of it
@@ -2697,7 +2702,7 @@ class ExplodeRenderer(Furniture):
                 self._draw_group(cv, d, p.children, p.path, levels, cam, poff,
                                  a, focus, labels)
                 continue
-            box = self._paint(cv, p.src, dest, a, 0.55 * (1.0 - lit) * e,
+            box = self._paint(cv, p.src, dest, a, self.dim * (1.0 - lit) * e,
                               p.holes)
             if box and e > 0.06:
                 self._outline(d, box, lit, a * e)
