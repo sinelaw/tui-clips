@@ -957,6 +957,36 @@ def test_an_explode_dive_can_keep_its_zoom(tmp):
     check(d["cam1"][1] < top < d["cam1"][3], "and the opened list's top is in view")
 
 
+def test_an_explode_can_open_close_on_one_piece(tmp):
+    """`open_on` starts the clip on a piece, framed by its `view_rows`.
+
+    A tall panel whose content fills only its top is shown close rather than
+    whole, and the camera rides with it as the screen comes apart -- so the
+    piece's own first beat starts where the camera already is, with no move.
+    """
+    a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),
+               (0, 20, 89, 39))
+    pieces = [{"rows": [0, 20], "cols": [0, 15], "label": "", "head": " ",
+               "offset": [-6, 0], "view_rows": [0, 8]},
+              {"rows": [0, 20], "cols": [15, 60], "label": "", "offset": [8, 0]}]
+
+    def timeline(**ex):
+        spec = spec_for(tmp, header_height=0, caption_height=0,
+                        explode={"pieces": pieces, **ex})
+        return render.make(spec, {"solo": a}, os.path.join(tmp, "f")).timeline
+
+    whole = timeline()
+    close = timeline(open_on=[0])
+    w = lambda c: c[2] - c[0]
+    check(w(close[0]["cam0"]) < w(whole[0]["cam0"]) / 1.5,
+          f"it opens closer than the whole screen ({w(close[0]['cam0']):.1f} < {w(whole[0]['cam0']):.1f})")
+    check(close[0]["cam0"][1] < 8 * 1.0 and close[0]["cam0"][3] < 20,
+          "framed on the view rows, not the piece's whole height")
+    kinds = [s["kind"] for s in close]
+    check("move" not in kinds[:kinds.index("hold")],
+          f"already on the piece, its first beat has no move ({kinds[:3]})")
+
+
 def test_explode_dims_what_it_did_not_lift(tmp):
     """the pieces are what the eye lands on, so everything else falls back."""
     a = banded(os.path.join(tmp, "a.png"), (0, 0, 200), (200, 0, 0),

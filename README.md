@@ -1080,6 +1080,17 @@ fan taller than the view runs off the bottom.
  "pieces": [ ... ]}
 ```
 
+`render.explode.open_on` opens the clip close on one piece instead of on the
+whole screen — the path of its indices down the tree, `[0]` for the first — and
+the camera rides with it as the screen comes apart round it. A piece's
+`view_rows` limits what the camera frames when it is on that piece, so a tall
+panel whose content fills only its top can be shown close rather than whole:
+
+```jsonc
+"explode": {"open_on": [0], "pieces": [
+  {"rows": [0, 36], "cols": [0, 39], "view_rows": [0, 23], ...}]}
+```
+
 Timings are `intro`, `explode`, `survey`, `move`, `hold`, `dive`, `rise`,
 `regroup`, `implode`, `outro`. Set any to `0` to drop that beat; a piece's own
 `survey` overrides the global one for the pause after it opens, so a clip can

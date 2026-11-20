@@ -2299,6 +2299,10 @@ def _pair(v):
     return (float(v[0]), float(v[1]))
 
 
+def _same_rect(a, b, eps: float = 1e-6) -> bool:
+    return all(abs(x - y) < eps for x, y in zip(a, b))
+
+
 class Piece:
     """One annotated rect, and where it goes when its container comes apart.
 
@@ -2332,6 +2336,10 @@ class Piece:
         self.dive_frame = d.get("dive_frame", "fit")
         # this piece's own pause once open, in place of `timing.survey`
         self.survey = d.get("survey")
+        # the rows the camera frames when it is on this piece (the clip's
+        # opening, if `open_on` names it, and its own beats): a tall panel
+        # whose content fills only its top can be shown close, not whole
+        self.view_rows = d.get("view_rows")
 
         if "offset" in d:
             self.off = (float(d["offset"][0]), float(d["offset"][1]))
@@ -2418,6 +2426,11 @@ class ExplodeRenderer(Furniture):
         if not self.pieces:
             raise SystemExit("render.explode.pieces is empty; nothing to take apart")
         self.by_path = {p.path: p for p in self.walk()}
+        # Open on one piece rather than on the whole screen: the path of its
+        # indices down the tree, e.g. [0] for the first top-level piece.
+        self.open_on = tuple(ex["open_on"]) if ex.get("open_on") is not None else None
+        if self.open_on is not None and self.open_on not in self.by_path:
+            raise SystemExit(f"render.explode.open_on {list(self.open_on)} names no piece")
 
         self.cap_intro = r.get("intro_caption", ["", ""])
         self.cap_outro = r.get("outro_caption", ["", ""])
@@ -2532,17 +2545,28 @@ class ExplodeRenderer(Furniture):
         survey = self._frame_rect(self.group_box((), open_root), SURVEY_CONTEXT)
 
         def framed(path, levels):
-            return self._frame_rect(self.world(path, levels), CONTEXT)
+            rect = self.world(path, levels)
+            vr = self.by_path[path].view_rows
+            if vr:
+                dy = rect[1] - self.by_path[path].src[1]
+                rect = (rect[0], vr[0] + dy, rect[2], vr[1] + dy)
+            return self._frame_rect(rect, CONTEXT)
 
         def dive_framed(path, levels):
             return self._frame_rect(self.group_box(path, levels), CONTEXT)
 
-        seg("intro", T["intro"], whole, whole,
+        # Where the clip opens: on the whole screen, or close on `open_on`,
+        # the camera riding with that piece as the screen comes apart round it.
+        first, opened = whole, survey
+        if self.open_on is not None:
+            first = framed(self.open_on, {})
+            opened = framed(self.open_on, open_root)
+        seg("intro", T["intro"], first, first,
             head=self.cap_intro[0], sub=self.cap_intro[1])
-        seg("explode", T["explode"], whole, survey,
+        seg("explode", T["explode"], first, opened,
             head=self.cap_survey[0], sub=self.cap_survey[1],
             lv0={}, lv1=open_root)
-        seg("survey", T["survey"], survey, survey,
+        seg("survey", T["survey"], opened, opened,
             head=self.cap_survey[0], sub=self.cap_survey[1], lv0=open_root)
 
         def walk(pieces, path, enter_cam):
@@ -2552,8 +2576,9 @@ class ExplodeRenderer(Furniture):
                     continue          # drawn, and labelled, but not dwelt on
                 cp, lv = p.path, self._levels(path)
                 cam = framed(cp, lv)
-                seg("move", T["move"], enter_cam, cam,
-                    focus=cp, head=p.head, sub=p.sub, lv0=lv)
+                if not _same_rect(enter_cam, cam):     # already there: no move
+                    seg("move", T["move"], enter_cam, cam,
+                        focus=cp, head=p.head, sub=p.sub, lv0=lv)
                 seg("hold", T["hold"], cam, cam,
                     focus=cp, head=p.head, sub=p.sub, lv0=lv)
                 enter_cam = cam
@@ -2577,7 +2602,7 @@ class ExplodeRenderer(Furniture):
                         lv0=lv_in, lv1=self._levels(cp, 0.0))
                     enter_cam = cam
 
-        walk(self.pieces, (), survey)
+        walk(self.pieces, (), opened)
         seg("regroup", T["regroup"], segs[-1]["cam1"], survey,
             head=self.cap_survey[0], sub=self.cap_survey[1], lv0=open_root)
         seg("implode", T["implode"], survey, whole,
